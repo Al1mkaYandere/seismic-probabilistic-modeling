@@ -1,0 +1,25 @@
+# Private / local research
+sandbox/
+
+# Generated pipeline artifacts
+outputs/*
+!outputs/.gitkeep
+
+# Python / Jupyter
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# LaTeX (if built outside sandbox)
+*.aux
+*.log
+*.out
+*.synctex.gz
