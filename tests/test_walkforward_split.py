@@ -1,10 +1,15 @@
-"""Check the walk-forward split for the 2023 test year (known issue A3).
+"""The walk-forward validation block must be the tail of the time axis.
 
-There is no need to train the DL models in a unit test — the row slice the
-model receives is fully determined by how src/validation.py reads the CSV
-and cuts the last 15% of rows (see _dl_train_predict, around lines 101-104,
-and run_walk_forward, around line 179). This test reproduces EXACTLY that
-arithmetic on the committed panel, without training a network.
+``src/validation.py`` used to cut validation as the last 15% of training ROWS.
+The panel on disk is sorted by ``["cell_id", "week"]`` (grid_builder.py), so
+that cut carved out whole cells instead of recent weeks: for the 2023 fold only
+3 of 17 cells reached validation, two of them absent from training altogether,
+leaving their embeddings untrained while the model still had to predict them.
+
+These tests call ``validation.temporal_validation_split`` directly, on the real
+panel. An earlier version of this file re-implemented the split arithmetic in
+its own fixture; it passed whatever ``validation.py`` did, including with the
+defect restored, and therefore tested nothing.
 """
 from __future__ import annotations
 
@@ -13,59 +18,58 @@ import pandas as pd
 import pytest
 
 from src import config
+from src.validation import VAL_FRACTION, temporal_validation_split
 
 PANEL_PATH = config.PROCESSED_DATA_PATH / config.PROCESSED_DATA_FILE
-TEST_YEAR = 2023
-VAL_FRACTION = 0.15  # see validation.py::_dl_train_predict, around line 102
 
 
 @pytest.fixture(scope="module")
-def train_val_split() -> dict:
-    df = pd.read_csv(PANEL_PATH)  # src/validation.py::run_walk_forward, line 179 — no re-sorting
+def panel() -> pd.DataFrame:
+    """The panel exactly as run_walk_forward reads and orders it."""
+    df = pd.read_csv(PANEL_PATH)
     df["week"] = pd.to_datetime(df["week"])
-
-    train_mask = df["week"].dt.year < TEST_YEAR
-    df_train = df.loc[train_mask].dropna(subset=["Y"]).reset_index(drop=True)
-
-    n_val = max(1, int(np.floor(VAL_FRACTION * len(df_train))))
-    val_df = df_train.iloc[-n_val:]
-
-    all_cells = set(df["cell_id"].unique())
-    return {"df": df, "df_train": df_train, "val_df": val_df, "all_cells": all_cells, "n_val": n_val}
+    return df.sort_values("week", kind="mergesort").reset_index(drop=True)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known issue A3: the slice is taken by row position, while the file "
-        "is sorted by cell (grid_builder.py saves "
-        "panel.sort_values(['cell_id', 'week'])). The last 15% of "
-        "df_train's rows are a handful of cells in full (in cell_id "
-        "alphabetical order), not the most recent weeks across all cells. "
-        "Verified empirically on the real panel: only 3 of 17 cells end up "
-        "in the 2023 validation split, and the slice starts in 2010 rather "
-        "than in the last few months of the training period."
-    ),
-)
-def test_validation_slice_has_all_cells_and_is_latest_by_time(train_val_split: dict):
-    """Two properties promised by the comment in validation.py ('chronological
-    slice — the last 15% of training rows'): (1) validation must include
-    every cell of the panel, (2) its weeks must be the most recent ones in
-    the training period.
+@pytest.mark.parametrize("test_year", [2018, 2019, 2020, 2021, 2022, 2023])
+def test_validation_block_is_latest_weeks_and_keeps_every_cell(panel: pd.DataFrame, test_year: int):
+    """Two properties, for every walk-forward fold.
+
+    1. Every cell present in the fold's training data is also present in
+       validation. Otherwise early stopping is steered by a spatial subset.
+    2. Every validation week is strictly later than every training week.
+       Otherwise the cut is not chronological at all.
     """
-    val_cells = set(train_val_split["val_df"]["cell_id"].unique())
-    all_cells = train_val_split["all_cells"]
-    assert val_cells == all_cells, (
-        f"validation contains {len(val_cells)} of {len(all_cells)} cells: "
-        f"missing {sorted(all_cells - val_cells)}"
+    df_train = panel.loc[panel["week"].dt.year < test_year].reset_index(drop=True)
+    weeks = df_train["week"].to_numpy()
+
+    tr_idx, val_idx = temporal_validation_split(weeks, VAL_FRACTION)
+
+    assert len(tr_idx) > 0 and len(val_idx) > 0
+
+    train_cells = set(df_train.loc[tr_idx, "cell_id"])
+    val_cells = set(df_train.loc[val_idx, "cell_id"])
+    assert train_cells - val_cells == set(), (
+        f"{test_year}: cells in training but never validated: "
+        f"{sorted(train_cells - val_cells)}"
+    )
+    assert val_cells - train_cells == set(), (
+        f"{test_year}: cells validated but never trained on: "
+        f"{sorted(val_cells - train_cells)}"
     )
 
-    df_train = train_val_split["df_train"]
-    val_df = train_val_split["val_df"]
-    n_val = train_val_split["n_val"]
-    true_latest_by_time = df_train.sort_values("week", kind="mergesort").iloc[-n_val:]
-    assert val_df["week"].min() == true_latest_by_time["week"].min(), (
-        f"the current slice starts at week {val_df['week'].min()}, but the "
-        f"actual last {n_val} rows of the training part by time start at "
-        f"{true_latest_by_time['week'].min()}"
+    assert weeks[val_idx].min() > weeks[tr_idx].max(), (
+        f"{test_year}: validation starts at {weeks[val_idx].min()}, which is not "
+        f"after the last training week {weeks[tr_idx].max()}"
     )
+
+
+def test_validation_block_holds_the_requested_share_of_weeks(panel: pd.DataFrame):
+    """The block is a share of unique WEEKS, not of rows."""
+    df_train = panel.loc[panel["week"].dt.year < 2023].reset_index(drop=True)
+    weeks = df_train["week"].to_numpy()
+    _, val_idx = temporal_validation_split(weeks, VAL_FRACTION)
+
+    n_unique = len(np.unique(weeks))
+    expected = max(1, int(np.floor(VAL_FRACTION * n_unique)))
+    assert len(np.unique(weeks[val_idx])) == expected

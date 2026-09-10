@@ -25,7 +25,13 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from src import config
-from src.dl_modeling import EarlyStopping, HybridModel, NegativeBinomialLoss, PoissonLoss
+from src.dl_modeling import (
+    EarlyStopping,
+    HybridModel,
+    NegativeBinomialLoss,
+    PoissonLoss,
+    _encode_cells,
+)
 
 config.FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 sns.set_theme(style="whitegrid", context="paper", font_scale=1.3)
@@ -84,10 +90,49 @@ def _fit_nb_mle_glm(y: np.ndarray, X_sm: np.ndarray) -> tuple:
     return best_res, best_llf, best_alpha
 
 
+VAL_FRACTION: float = 0.15
+
+
+def temporal_validation_split(
+    weeks_train: np.ndarray,
+    val_fraction: float = VAL_FRACTION,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split training rows into (train, validation) indices along the time axis.
+
+    The validation block is the last ``val_fraction`` of the training period's
+    UNIQUE WEEKS, not of its rows. The panel on disk is sorted by
+    ``["cell_id", "week"]`` (see grid_builder.py), so a row-position cut carves
+    out whole cells instead of the tail of the time axis: for the 2023 fold that
+    put 3 of 17 cells into validation, two of them absent from training
+    altogether, and left their embeddings untrained.
+
+    Kept as a separate function so the property can be tested directly against
+    the real panel instead of being re-implemented in a test.
+
+    Parameters
+    ----------
+    weeks_train : np.ndarray
+        Week of each training row, in the row order the caller will use.
+    val_fraction : float
+        Share of unique weeks to hold out, from the end of the period.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Positional indices into ``weeks_train``: training rows, validation rows.
+    """
+    unique_weeks = np.unique(weeks_train)
+    n_val_weeks = max(1, int(np.floor(val_fraction * len(unique_weeks))))
+    val_weeks = unique_weeks[-n_val_weeks:]
+    val_mask = np.isin(weeks_train, val_weeks)
+    return np.where(~val_mask)[0], np.where(val_mask)[0]
+
+
 def _dl_train_predict(
     X_train_scaled: np.ndarray,
     y_train: np.ndarray,
     c_train: np.ndarray,
+    weeks_train: np.ndarray,
     X_test_scaled: np.ndarray,
     c_test: np.ndarray,
     num_cells: int,
@@ -98,10 +143,7 @@ def _dl_train_predict(
 ) -> np.ndarray:
     """Train a DL model and return test predictions (mu only)."""
     set_seeds(seed)
-    # Chronological validation cut — last 15 % of training rows (sorted order is preserved)
-    n_val = max(1, int(np.floor(0.15 * len(y_train))))
-    tr_idx = np.arange(len(y_train) - n_val)
-    val_idx = np.arange(len(y_train) - n_val, len(y_train))
+    tr_idx, val_idx = temporal_validation_split(weeks_train, VAL_FRACTION)
 
     X_tr, X_val = X_train_scaled[tr_idx], X_train_scaled[val_idx]
     y_tr, y_val = y_train[tr_idx], y_train[val_idx]
@@ -178,6 +220,10 @@ def run_walk_forward() -> pd.DataFrame:
     processed_path = config.PROCESSED_DATA_PATH / config.PROCESSED_DATA_FILE
     df = pd.read_csv(processed_path)
     df["week"] = pd.to_datetime(df["week"])
+    # grid_builder.py writes the panel sorted by ["cell_id", "week"]; re-sort by
+    # week so downstream row-position slicing (see _dl_train_predict) cuts by
+    # time, not by cell.
+    df = df.sort_values("week", kind="mergesort").reset_index(drop=True)
 
     FEATURES_ENHANCED = [
         "Y_lag1", "mag_max_lag1", "mag_min_lag1",
@@ -185,9 +231,6 @@ def run_walk_forward() -> pd.DataFrame:
     ]
 
     df = df.reindex(columns=["cell_id", "week", "Y"] + FEATURES_ENHANCED, fill_value=0.0)
-    cell_codes, _ = pd.factorize(df["cell_id"].astype(str), sort=True)
-    df["cell_id_idx"] = cell_codes.astype(np.int64)
-    num_cells = int(df["cell_id_idx"].nunique())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load raw events for ETAS
@@ -230,8 +273,13 @@ def run_walk_forward() -> pd.DataFrame:
         X_test = df_test[FEATURES_ENHANCED].fillna(0.0).astype(np.float32)
         y_train = df_train["Y"].astype(np.float32).to_numpy()
         y_test = df_test["Y"].astype(np.float32).to_numpy()
-        c_train_arr = df_train["cell_id_idx"].astype(np.int64).to_numpy()
-        c_test_arr = df_test["cell_id_idx"].astype(np.int64).to_numpy()
+        # Cell embeddings are indexed off this fold's training cells only — a
+        # cell absent from training (rare after the time-based validation cut
+        # above, but not impossible) maps to a dedicated "unknown cell" index
+        # instead of a random, untrained vector (mirrors
+        # dl_modeling.py::_encode_cells).
+        c_train_arr, num_cells = _encode_cells(df_train["cell_id"], df_train["cell_id"])
+        c_test_arr, _ = _encode_cells(df_train["cell_id"], df_test["cell_id"])
 
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
@@ -262,7 +310,7 @@ def run_walk_forward() -> pd.DataFrame:
         mae_dl, rmse_dl, dev_dl = np.nan, np.nan, np.nan
         try:
             preds_dl = _dl_train_predict(
-                X_train_scaled, y_train, c_train_arr,
+                X_train_scaled, y_train, c_train_arr, df_train["week"].to_numpy(),
                 X_test_scaled, c_test_arr, num_cells,
                 len(FEATURES_ENHANCED), device, loss_kind="nb",
             )
@@ -282,7 +330,7 @@ def run_walk_forward() -> pd.DataFrame:
         mae_np, rmse_np, dev_np = np.nan, np.nan, np.nan
         try:
             preds_np = _dl_train_predict(
-                X_train_scaled, y_train, c_train_arr,
+                X_train_scaled, y_train, c_train_arr, df_train["week"].to_numpy(),
                 X_test_scaled, c_test_arr, num_cells,
                 len(FEATURES_ENHANCED), device, loss_kind="poisson",
             )
