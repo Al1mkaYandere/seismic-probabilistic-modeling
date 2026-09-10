@@ -43,6 +43,7 @@ def main() -> int:
     8. Alpha identifiability (5 seeds)
     9. Tail-conditional evaluation
     10. Spatial diagnostics (Moran's I)
+    11. Probabilistic evaluation of every model on all test observations
     """
     setup_logging()
     logging.getLogger().setLevel(logging.WARNING)
@@ -154,6 +155,13 @@ def main() -> int:
             run_spatial_diagnostics()
         except Exception as exc:
             logger.warning("Spatial diagnostics failed: %s", exc)
+
+        # ── Step 11: Probabilistic evaluation on the whole test split ────────
+        try:
+            from src.probabilistic_evaluation import run_probabilistic_evaluation
+            run_probabilistic_evaluation()
+        except Exception as exc:
+            logger.warning("Probabilistic evaluation failed: %s", exc)
 
         n_cells = processed["cell_id"].nunique()
         t_min = processed["week"].min()
