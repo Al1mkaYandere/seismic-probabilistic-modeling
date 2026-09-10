@@ -177,11 +177,46 @@ def _leave_one_out_moran(
     return pd.DataFrame(rows)
 
 
-def run_spatial_diagnostics() -> pd.DataFrame:
-    """Compute Moran's I for residuals of available models and save artefacts."""
+def _artefact_paths(out_dir: Path | None) -> tuple[Path, Path, Path, Path]:
+    """Where the four Moran artefacts go: (residuals, weekly, influence, figure).
+
+    ``out_dir=None`` means the pipeline's own configured locations, and those
+    are NOT all in one directory: the three CSVs live in ``outputs/`` while the
+    figure lives in ``outputs/figures/``. Deriving the figure's path from the
+    CSV directory would silently move it up one level on every real run, and
+    the frozen-baseline check would not notice — it only tracks CSVs.
+
+    Kept as a separate function so both branches can be asserted directly
+    instead of being re-implemented inside a test.
+    """
+    if out_dir is None:
+        return (OUTPUT_MORAN_CSV, OUTPUT_MORAN_WEEKLY_CSV,
+                OUTPUT_MORAN_INFLUENCE_CSV, OUTPUT_MORAN_FIG)
+    base = Path(out_dir)
+    return (base / OUTPUT_MORAN_CSV.name, base / OUTPUT_MORAN_WEEKLY_CSV.name,
+            base / OUTPUT_MORAN_INFLUENCE_CSV.name, base / OUTPUT_MORAN_FIG.name)
+
+
+def run_spatial_diagnostics(out_dir: Path | None = None) -> pd.DataFrame:
+    """Compute Moran's I for residuals of available models and save artefacts.
+
+    Parameters
+    ----------
+    out_dir : Path | None
+        Directory to write all four artefacts into. ``None`` (the default,
+        and what the pipeline uses) keeps every configured path exactly as it
+        was — see ``_artefact_paths``. Tests pass a temporary directory
+        instead: this function is called directly by the test suite, and
+        without this argument every test run overwrites the pipeline's Moran
+        outputs — harmless while the code is correct, but it silently poisons
+        the frozen-baseline comparison when the test run is a deliberate
+        mutation of that same code.
+    """
     if not PROCESSED_DATA.exists():
         logger.warning("Spatial diagnostics skipped: processed data not found")
         return pd.DataFrame()
+
+    moran_csv, moran_weekly_csv, moran_influence_csv, moran_fig = _artefact_paths(out_dir)
 
     panel = pd.read_csv(PROCESSED_DATA)
     panel["week"] = pd.to_datetime(panel["week"])
@@ -261,7 +296,7 @@ def run_spatial_diagnostics() -> pd.DataFrame:
 
     if influence_rows:
         influence = pd.concat(influence_rows, ignore_index=True)
-        influence.to_csv(OUTPUT_MORAN_INFLUENCE_CSV, index=False)
+        influence.to_csv(moran_influence_csv, index=False)
         for model_name, grp in influence.groupby("model"):
             worst = grp.loc[grp["p_perm_without"].idxmax()]
             logger.info(
@@ -271,14 +306,14 @@ def run_spatial_diagnostics() -> pd.DataFrame:
             )
 
     out_df = pd.DataFrame(rows)
-    OUTPUT_MORAN_CSV.parent.mkdir(parents=True, exist_ok=True)
-    out_df.to_csv(OUTPUT_MORAN_CSV, index=False)
-    logger.info("Saved Moran results to %s", OUTPUT_MORAN_CSV)
+    moran_csv.parent.mkdir(parents=True, exist_ok=True)
+    out_df.to_csv(moran_csv, index=False)
+    logger.info("Saved Moran results to %s", moran_csv)
 
     weekly_df = _weekly_moran(models_to_check, comparison_df, cell_order, W, B=999)
-    OUTPUT_MORAN_WEEKLY_CSV.parent.mkdir(parents=True, exist_ok=True)
-    weekly_df.to_csv(OUTPUT_MORAN_WEEKLY_CSV, index=False)
-    logger.info("Saved weekly Moran results to %s (%d rows)", OUTPUT_MORAN_WEEKLY_CSV, len(weekly_df))
+    moran_weekly_csv.parent.mkdir(parents=True, exist_ok=True)
+    weekly_df.to_csv(moran_weekly_csv, index=False)
+    logger.info("Saved weekly Moran results to %s (%d rows)", moran_weekly_csv, len(weekly_df))
     if not weekly_df.empty:
         agg = weekly_df.groupby("model").agg(
             n_weeks=("moran_I", "count"),
@@ -293,7 +328,7 @@ def run_spatial_diagnostics() -> pd.DataFrame:
 
     if not out_df.empty and "moran_I" in out_df.columns:
         try:
-            OUTPUT_MORAN_FIG.parent.mkdir(parents=True, exist_ok=True)
+            moran_fig.parent.mkdir(parents=True, exist_ok=True)
             fig, ax = plt.subplots(figsize=(10, 5))
             colors = ["#c0392b" if p < 0.05 else "#1F4E79"
                       for p in out_df["p_perm"].fillna(1.0)]
@@ -302,7 +337,7 @@ def run_spatial_diagnostics() -> pd.DataFrame:
             ax.set_xlabel("Moran's I (red = significant p<0.05)")
             ax.set_title("Spatial autocorrelation of Pearson residuals")
             fig.tight_layout()
-            fig.savefig(OUTPUT_MORAN_FIG, dpi=250)
+            fig.savefig(moran_fig, dpi=250)
             plt.close(fig)
         except Exception as exc:
             logger.warning("Moran figure failed: %s", exc)
