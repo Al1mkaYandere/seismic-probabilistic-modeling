@@ -354,7 +354,7 @@ def run_walk_forward() -> pd.DataFrame:
                 train_end = pd.Timestamp(f"{test_year}-01-01")
                 params = fit_etas_per_cell(raw_df, train_end)
                 weeks_grid = df_test[["cell_id", "week"]].copy()
-                pred_etas_df = predict_etas(params, weeks_grid)
+                pred_etas_df = predict_etas(params, weeks_grid, raw_df)
                 df_test_etas = df_test.merge(pred_etas_df, on=["cell_id", "week"], how="left")
                 df_test_etas["lambda_pred"] = df_test_etas["lambda_pred"].fillna(0.1).clip(lower=1e-9)
                 y_etas = df_test_etas["Y"].astype(float).to_numpy()

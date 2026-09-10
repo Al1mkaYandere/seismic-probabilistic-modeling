@@ -1,10 +1,13 @@
 """Behavioural checks for ETAS: response to a strong event and reproducibility.
 
-The first test in this file is an expected failure (xfail) documenting known
-issue A1 (described where its xfail is declared, below). The second test used
-to document known issue A2 (unseeded optimizer restarts) but A2 is now fixed
-(see ``seed`` on ``_fit_cell``/``fit_etas_per_cell`` in ``src/etas_baseline.py``),
-so its xfail marker was removed and it now runs as a normal (passing) test.
+Both tests in this file used to be expected failures (xfail) documenting known
+issues A1 and A2. A2 (unseeded optimizer restarts) was fixed in microstep 2a.
+A1 (``predict_etas`` only seeing events up to ``train_end``, never events
+inside the forecast period) is fixed in step 5: ``predict_etas`` now takes the
+full event catalog and, for each (cell_id, week) row, uses that cell's events
+strictly before the week's start — parameters are still fit only on the
+training split, so this does not reopen the leakage A2 closed. Both xfail
+markers have been removed; both tests now run as normal (passing) tests.
 The synthetic catalog and the expected outcome were worked out and checked by
 hand in advance, not fitted to whatever the code currently outputs — see
 the comments inside each test.
@@ -56,18 +59,6 @@ def _synthetic_catalog_with_strong_event_inside_forecast_period() -> tuple[pd.Da
     return events_df, train_end, week_before_start, week_after_start
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known issue A1: predict_etas uses a frozen list of events up to "
-        "train_end (params_by_cell[...]['train_t_days']/['train_m']), so it "
-        "never sees a strong event that occurs INSIDE the forecast period. "
-        "Verified empirically: the forecast for the week right after the "
-        "M6.9 event is NOT higher than the forecast for a week a month "
-        "before it (on this test's synthetic catalog it is even slightly "
-        "lower, because the contribution of older history decays over time)."
-    ),
-)
 def test_etas_forecast_rises_after_strong_event_inside_forecast_period():
     events_df, train_end, week_before_start, week_after_start = (
         _synthetic_catalog_with_strong_event_inside_forecast_period()
@@ -75,7 +66,7 @@ def test_etas_forecast_rises_after_strong_event_inside_forecast_period():
     params = fit_etas_per_cell(events_df, train_end)
 
     weeks_grid = pd.DataFrame({"cell_id": ["TEST", "TEST"], "week": [week_before_start, week_after_start]})
-    pred = predict_etas(params, weeks_grid)
+    pred = predict_etas(params, weeks_grid, events_df)
 
     pred_before = float(pred.loc[pred["week"] == week_before_start, "lambda_pred"].iloc[0])
     pred_after = float(pred.loc[pred["week"] == week_after_start, "lambda_pred"].iloc[0])

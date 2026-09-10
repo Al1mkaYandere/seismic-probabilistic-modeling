@@ -109,13 +109,23 @@ def _fit_cell(
 
 def _predict_cell(
     params: dict,
-    train_t_days: np.ndarray,
-    train_m: np.ndarray,
+    hist_t_days: np.ndarray,
+    hist_m: np.ndarray,
     target_week_starts_days: np.ndarray,
     week_duration_days: float = 7.0,
     m_c: float = M_C_DEFAULT,
 ) -> np.ndarray:
-    """Integrate lambda_c over each target week to get expected counts."""
+    """Integrate lambda_c over each target week to get expected counts.
+
+    ``hist_t_days``/``hist_m`` are the event history available AT PREDICTION
+    TIME (relative days from the cell's ``origin`` and magnitudes) — the
+    caller (``predict_etas``) is responsible for restricting this to events
+    strictly before each target week's start. This is distinct from the
+    events used to FIT ``params`` (which are restricted to ``train_end`` by
+    ``fit_etas_per_cell``): the model's parameters are estimated only on the
+    training split, but the aftershock history used at prediction time may
+    extend further, up to (not including) the week being predicted.
+    """
     mu = params["mu"]
     K = params.get("K", 0.0)
     c = params.get("c", 0.01)
@@ -123,15 +133,15 @@ def _predict_cell(
     a = params.get("a", 1.0)
 
     preds = np.full(len(target_week_starts_days), mu * week_duration_days, dtype=np.float64)
-    if K <= 0 or len(train_t_days) == 0:
+    if K <= 0 or len(hist_t_days) == 0:
         return np.maximum(preds, 1e-9)
 
     for j, t_start in enumerate(target_week_starts_days):
         t_end = t_start + week_duration_days
         af = 0.0
-        for i in range(len(train_t_days)):
-            ti = float(train_t_days[i])
-            mi = float(train_m[i])
+        for i in range(len(hist_t_days)):
+            ti = float(hist_t_days[i])
+            mi = float(hist_m[i])
             coef = K * np.exp(a * (mi - m_c))
             # integral from max(t_start, ti) to t_end of coef*(s-ti+c)^{-p} ds
             s0 = max(t_start, ti)
@@ -206,13 +216,11 @@ def fit_etas_per_cell(
             rate = len(t_days) / max((train_end - origin).total_seconds() / 86400.0, 1.0)
             params_by_cell[str(cell_id)] = {
                 "mu": float(rate), "K": 0.0, "c": 0.01, "p": 1.1, "a": 1.0,
-                "fallback": True, "origin": origin, "train_t_days": t_days, "train_m": m_arr,
+                "fallback": True, "origin": origin,
             }
         else:
             p = _fit_cell(t_days, m_arr, m_c, seed=cell_seed)
             p["origin"] = origin
-            p["train_t_days"] = t_days
-            p["train_m"] = m_arr
             params_by_cell[str(cell_id)] = p
 
     return params_by_cell
@@ -221,9 +229,19 @@ def fit_etas_per_cell(
 def predict_etas(
     params_by_cell: dict[str, dict],
     weeks_grid: pd.DataFrame,
+    events_df: pd.DataFrame,
     m_c: float = M_C_DEFAULT,
 ) -> pd.DataFrame:
     """Predict expected counts for each (cell_id, week) in weeks_grid.
+
+    ETAS is a conditional-intensity model: its aftershock term depends on
+    "what happened recently", so predicting a given week requires the event
+    history up to (but not including) that week — not just the history
+    available at fit time. ``fit_etas_per_cell`` still estimates PARAMETERS
+    only from events before ``train_end`` (no leakage there); this function
+    separately supplies the full event HISTORY, which may extend into the
+    forecast period. For each (cell_id, week) row, only that cell's events
+    with ``time`` strictly less than the week's start are used.
 
     Parameters
     ----------
@@ -231,26 +249,71 @@ def predict_etas(
         Output of ``fit_etas_per_cell``.
     weeks_grid : pd.DataFrame
         Must have columns ``cell_id`` and ``week`` (Timestamp).
+    events_df : pd.DataFrame
+        Full raw event catalog (``time``, ``mag``, ``cell_id``) — not
+        restricted to the training period. Events at or after a given week's
+        start are excluded from that week's prediction, but events between
+        ``train_end`` and the week's start (i.e. inside the forecast period)
+        ARE included.
 
     Returns
     -------
     pd.DataFrame
         Columns: ``cell_id``, ``week``, ``lambda_pred``.
     """
+    events_work = events_df[["time", "mag", "cell_id"]].copy()
+    if hasattr(events_work["time"].dt, "tz") and events_work["time"].dt.tz is not None:
+        events_work["time"] = events_work["time"].dt.tz_localize(None)
+
+    weeks_grid = weeks_grid.copy()
+    weeks_grid["week"] = pd.to_datetime(weeks_grid["week"])
+    if hasattr(weeks_grid["week"].dt, "tz") and weeks_grid["week"].dt.tz is not None:
+        weeks_grid["week"] = weeks_grid["week"].dt.tz_localize(None)
+
+    # Sort each cell's events by time once, so that per-row history lookups
+    # below can advance a pointer instead of re-filtering the whole catalog
+    # for every (cell, week) row. Without this, a naive "filter events_df for
+    # every panel row" implementation degrades to O(rows * total events).
+    events_by_cell: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for cid, grp in events_work.groupby("cell_id"):
+        grp_sorted = grp.sort_values("time")
+        events_by_cell[str(cid)] = (
+            grp_sorted["time"].to_numpy(),
+            grp_sorted["mag"].to_numpy(dtype=np.float64),
+        )
+    empty_times = np.array([], dtype="datetime64[ns]")
+    empty_mags = np.array([], dtype=np.float64)
+
     rows = []
-    for _, row in weeks_grid.iterrows():
-        cid = str(row["cell_id"])
-        wk = pd.Timestamp(row["week"])
+    for cid, wk_grp in weeks_grid.groupby("cell_id", sort=False):
+        cid = str(cid)
+        wk_sorted = wk_grp.sort_values("week")
         if cid not in params_by_cell:
-            rows.append({"cell_id": cid, "week": wk, "lambda_pred": 0.1})
+            for wk in wk_sorted["week"]:
+                rows.append({"cell_id": cid, "week": pd.Timestamp(wk), "lambda_pred": 0.1})
             continue
+
         p = params_by_cell[cid]
         origin = p["origin"]
-        train_t = p.get("train_t_days", np.array([]))
-        train_m = p.get("train_m", np.array([]))
-        t_start_days = (wk - origin).total_seconds() / 86400.0
-        pred = _predict_cell(p, train_t, train_m, np.array([t_start_days]), m_c=m_c)[0]
-        rows.append({"cell_id": cid, "week": wk, "lambda_pred": float(pred)})
+        origin_dt64 = pd.Timestamp(origin).to_datetime64()
+        ev_times, ev_mags = events_by_cell.get(cid, (empty_times, empty_mags))
+        ev_t_days = (ev_times - origin_dt64) / np.timedelta64(1, "D")
+        n_events = len(ev_t_days)
+
+        # Weeks are processed in ascending order per cell, so the set of
+        # "events strictly before this week's start" only ever grows: a
+        # single forward-moving pointer replaces a fresh scan per row.
+        ptr = 0
+        for wk in wk_sorted["week"]:
+            wk = pd.Timestamp(wk)
+            t_start_days = (wk - origin).total_seconds() / 86400.0
+            while ptr < n_events and ev_t_days[ptr] < t_start_days:
+                ptr += 1
+            hist_t = ev_t_days[:ptr]
+            hist_m = ev_mags[:ptr]
+            pred = _predict_cell(p, hist_t, hist_m, np.array([t_start_days]), m_c=m_c)[0]
+            rows.append({"cell_id": cid, "week": wk, "lambda_pred": float(pred)})
+
     return pd.DataFrame(rows)
 
 
@@ -288,7 +351,7 @@ def run_etas_static(
     params_by_cell = fit_etas_per_cell(events_df, train_end, m_c)
 
     test_panel = panel_df[panel_df["week"].isin(test_weeks)][["cell_id", "week", "Y"]].copy()
-    pred_df = predict_etas(params_by_cell, test_panel[["cell_id", "week"]], m_c)
+    pred_df = predict_etas(params_by_cell, test_panel[["cell_id", "week"]], events_df, m_c)
     test_panel = test_panel.merge(pred_df, on=["cell_id", "week"], how="left")
     test_panel["lambda_pred"] = test_panel["lambda_pred"].fillna(0.1).clip(lower=1e-9)
 
