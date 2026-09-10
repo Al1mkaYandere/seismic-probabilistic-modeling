@@ -60,17 +60,6 @@ def test_nbloss_converges_to_poisson_plus_log_factorial():
     assert nb_loss == pytest.approx(poisson_loss + log_factorial, abs=1e-6)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known issue A5: _poisson_nll (tail_metrics.py) omits log(y!), while "
-        "_nb_nll includes it. The reference here is an independent "
-        "computation of the true Poisson NLL via scipy.stats.poisson.logpmf "
-        "(which includes log(y!) by definition). _poisson_nll currently "
-        "differs from it by exactly the sample mean of log(y!); the test "
-        "will pass once +gammaln(y+1) is added to _poisson_nll."
-    ),
-)
 def test_poisson_nll_missing_log_factorial():
     mu_np, y_np = _synthetic_counts(seed=2)
     true_poisson_nll = float(np.mean(-sp_poisson.logpmf(y_np, mu_np)))

@@ -33,8 +33,9 @@ MODEL_COMPARISON = config.MODEL_COMPARISON_CSV
 
 
 def _poisson_nll(y: np.ndarray, mu: np.ndarray) -> float:
+    from scipy.special import gammaln
     mu = np.clip(mu, 1e-9, None)
-    return float(np.mean(mu - y * np.log(mu)))
+    return float(np.mean(mu - y * np.log(mu) + gammaln(y + 1.0)))
 
 
 def _nb_nll(y: np.ndarray, mu: np.ndarray, alpha: float | np.ndarray) -> float:
