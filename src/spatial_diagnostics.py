@@ -19,6 +19,8 @@ from src import config
 logger = logging.getLogger(__name__)
 
 OUTPUT_MORAN_CSV = config.MORAN_RESIDUALS_CSV
+OUTPUT_MORAN_WEEKLY_CSV = OUTPUT_MORAN_CSV.parent / "moran_weekly.csv"
+OUTPUT_MORAN_INFLUENCE_CSV = OUTPUT_MORAN_CSV.parent / "moran_influence.csv"
 OUTPUT_MORAN_FIG = config.MORAN_RESIDUALS_FIG
 PREDICTION_STORE = config.TEST_PREDICTIONS_CSV
 CALIBRATION_PREDS = config.CALIBRATION_PREDICTIONS_CSV
@@ -60,6 +62,15 @@ def _morans_i(x: np.ndarray, W: np.ndarray) -> float:
     return numerator / denominator
 
 
+def _residuals(y: np.ndarray, mu: np.ndarray, alpha: float | None) -> np.ndarray:
+    """Pearson-style residual (y - mu) / sqrt(Var); NB variance if alpha is given."""
+    if alpha is not None and np.isfinite(alpha) and alpha > 0:
+        denom = np.sqrt(np.maximum(mu + alpha * mu ** 2, 1e-12))
+    else:
+        denom = np.sqrt(np.maximum(mu, 1e-12))
+    return (y - mu) / denom
+
+
 def _permutation_test(x: np.ndarray, W: np.ndarray, B: int = 999) -> tuple[float, float, float]:
     """Returns (observed_I, z_score, p_value) under permutation null."""
     obs = _morans_i(x, W)
@@ -73,8 +84,97 @@ def _permutation_test(x: np.ndarray, W: np.ndarray, B: int = 999) -> tuple[float
     mean_p = float(np.mean(perm_vals))
     std_p = float(np.std(perm_vals, ddof=1))
     z = (obs - mean_p) / max(std_p, 1e-12)
-    p_val = float(np.mean(perm_vals >= obs))
+    # Two-sided permutation p-value with the standard +1 correction: a
+    # one-sided p = mean(perm >= obs) tests only for POSITIVE autocorrelation
+    # and is structurally doomed to be large whenever the observed I is
+    # negative (see A8). (1 + r) / (B + 1) avoids p = 0 with finite B.
+    r = int(np.sum(np.abs(perm_vals - mean_p) >= np.abs(obs - mean_p)))
+    p_val = (1 + r) / (B + 1)
     return obs, z, p_val
+
+
+def _weekly_moran(models_to_check: list[dict], comparison_df: pd.DataFrame,
+                   cell_order: list[str], W: np.ndarray, B: int = 999) -> pd.DataFrame:
+    """Moran's I computed separately on each week's 17-cell residual vector.
+
+    The main table above averages residuals across all 144 test weeks before
+    testing for spatial autocorrelation; that averaging cancels out exactly
+    the week-by-week signal the test is meant to detect. Here the same
+    permutation test is re-run once per week, with no averaging beforehand.
+    Aggregation across weeks (mean I, share of weeks with p < 0.05) is left
+    to the caller.
+    """
+    rows: list[dict] = []
+    for m in models_to_check:
+        if m["source"] == "calib":
+            model_name = m["col"]
+            y = m["y_true"]
+            mu = m["mu_pred"]
+            alpha_arr = m.get("alpha_pred")
+            alpha_scalar = float(np.mean(alpha_arr)) if alpha_arr is not None else None
+            cell_ids_arr = m.get("cell_id")
+            weeks_arr = m.get("week")
+        else:
+            df = m["df"]
+            model_name = m["col"]
+            y = df["y_true"].to_numpy(dtype=np.float64)
+            mu = df[m["col"]].to_numpy(dtype=np.float64)
+            alpha_row = comparison_df[comparison_df["model"] == model_name] if not comparison_df.empty else pd.DataFrame()
+            alpha_scalar = float(alpha_row["alpha_hat"].iloc[0]) if not alpha_row.empty and "alpha_hat" in alpha_row.columns else None
+            cell_ids_arr = df["cell_id"].astype(str).to_numpy() if "cell_id" in df.columns else None
+            weeks_arr = df["week"].to_numpy() if "week" in df.columns else None
+
+        if cell_ids_arr is None or weeks_arr is None:
+            continue
+
+        try:
+            r = _residuals(y, mu, alpha_scalar)
+            week_df = pd.DataFrame({
+                "cell_id": np.asarray(cell_ids_arr, dtype=str),
+                "week": weeks_arr,
+                "resid": r,
+            })
+            for week, sub in week_df.groupby("week"):
+                cell_vals = sub.groupby("cell_id")["resid"].mean().reindex(cell_order)
+                if cell_vals.isna().any():
+                    # Week does not cover all cells; skip rather than fabricate a 0 residual.
+                    continue
+                obs_I, z, p = _permutation_test(cell_vals.to_numpy(dtype=np.float64), W, B=B)
+                rows.append({"model": model_name, "week": week, "moran_I": obs_I, "z_score": z, "p_perm": p})
+        except Exception as exc:
+            logger.warning("Weekly spatial diagnostics failed for %s: %s", model_name, exc)
+    return pd.DataFrame(rows)
+
+
+def _leave_one_out_moran(
+    cell_values: np.ndarray,
+    cells_df: pd.DataFrame,
+    grid_size: float,
+    b: int = 999,
+) -> pd.DataFrame:
+    """Refit Moran's I with each cell dropped in turn.
+
+    With only ~17 cells a single cell can carry the whole statistic, so the
+    full-sample value alone says little. This reports, for every cell, what
+    Moran's I and its p-value become once that cell is removed, which makes an
+    influential cell immediately visible.
+    """
+    order = cells_df["cell_id"].tolist()
+    rows: list[dict] = []
+    for i, dropped in enumerate(order):
+        keep = [j for j in range(len(order)) if j != i]
+        sub_cells = cells_df.iloc[keep].reset_index(drop=True)
+        sub_w = _build_queen_weights(sub_cells, grid_size)
+        obs_i, z, p = _permutation_test(cell_values[keep], sub_w, B=b)
+        rows.append(
+            {
+                "dropped_cell": dropped,
+                "moran_I_without": obs_i,
+                "z_score_without": z,
+                "p_perm_without": p,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def run_spatial_diagnostics() -> pd.DataFrame:
@@ -94,6 +194,7 @@ def run_spatial_diagnostics() -> pd.DataFrame:
     n_cells = len(cell_order)
 
     rows: list[dict] = []
+    influence_rows: list[pd.DataFrame] = []
     models_to_check: list[dict] = []
 
     if PREDICTION_STORE.exists():
@@ -114,17 +215,14 @@ def run_spatial_diagnostics() -> pd.DataFrame:
                     "mu_pred": sub["mu_pred"].to_numpy(dtype=np.float64),
                     "alpha_pred": sub["alpha_pred"].to_numpy(dtype=np.float64) if "alpha_pred" in sub.columns else None,
                     "cell_id": sub["cell_id"].to_numpy(dtype=str) if "cell_id" in sub.columns else None,
+                    "week": sub["week"].to_numpy() if "week" in sub.columns else None,
                 })
 
     comparison_df = pd.read_csv(MODEL_COMPARISON) if MODEL_COMPARISON.exists() else pd.DataFrame()
 
     def _get_cell_residuals(y: np.ndarray, mu: np.ndarray, alpha: float | None,
                             cell_ids_arr: np.ndarray | None) -> np.ndarray:
-        if alpha is not None and np.isfinite(alpha) and alpha > 0:
-            denom = np.sqrt(np.maximum(mu + alpha * mu ** 2, 1e-12))
-        else:
-            denom = np.sqrt(np.maximum(mu, 1e-12))
-        r = (y - mu) / denom
+        r = _residuals(y, mu, alpha)
         if cell_ids_arr is not None:
             cell_mean = pd.Series(r).groupby(pd.Categorical(cell_ids_arr, categories=cell_order), observed=False).mean()
             return cell_mean.reindex(cell_order).fillna(0.0).to_numpy()
@@ -154,14 +252,44 @@ def run_spatial_diagnostics() -> pd.DataFrame:
 
             obs_I, z, p = _permutation_test(cell_r, W, B=999)
             rows.append({"model": model_name, "moran_I": obs_I, "z_score": z, "p_perm": p})
+            loo = _leave_one_out_moran(cell_r, cells_df, gs)
+            loo.insert(0, "model", model_name)
+            influence_rows.append(loo)
             logger.info("Moran's I for %s: I=%.4f z=%.3f p=%.4f", model_name, obs_I, z, p)
         except Exception as exc:
             logger.warning("Spatial diagnostics failed for %s: %s", m.get("col", "?"), exc)
+
+    if influence_rows:
+        influence = pd.concat(influence_rows, ignore_index=True)
+        influence.to_csv(OUTPUT_MORAN_INFLUENCE_CSV, index=False)
+        for model_name, grp in influence.groupby("model"):
+            worst = grp.loc[grp["p_perm_without"].idxmax()]
+            logger.info(
+                "Moran influence for %s: dropping %s moves p to %.3f (I=%.4f)",
+                model_name, worst["dropped_cell"],
+                worst["p_perm_without"], worst["moran_I_without"],
+            )
 
     out_df = pd.DataFrame(rows)
     OUTPUT_MORAN_CSV.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_csv(OUTPUT_MORAN_CSV, index=False)
     logger.info("Saved Moran results to %s", OUTPUT_MORAN_CSV)
+
+    weekly_df = _weekly_moran(models_to_check, comparison_df, cell_order, W, B=999)
+    OUTPUT_MORAN_WEEKLY_CSV.parent.mkdir(parents=True, exist_ok=True)
+    weekly_df.to_csv(OUTPUT_MORAN_WEEKLY_CSV, index=False)
+    logger.info("Saved weekly Moran results to %s (%d rows)", OUTPUT_MORAN_WEEKLY_CSV, len(weekly_df))
+    if not weekly_df.empty:
+        agg = weekly_df.groupby("model").agg(
+            n_weeks=("moran_I", "count"),
+            mean_moran_I=("moran_I", "mean"),
+            share_p_lt_05=("p_perm", lambda s: float(np.mean(s < 0.05))),
+        )
+        for model_name, arow in agg.iterrows():
+            logger.info(
+                "Weekly Moran aggregate for %s: n_weeks=%d mean_I=%.4f share_p<0.05=%.3f",
+                model_name, int(arow["n_weeks"]), arow["mean_moran_I"], arow["share_p_lt_05"],
+            )
 
     if not out_df.empty and "moran_I" in out_df.columns:
         try:

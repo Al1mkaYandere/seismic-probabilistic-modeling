@@ -62,18 +62,6 @@ def test_moran_does_not_flag_white_noise():
     assert p > 0.05, f"the test found a signal in pure noise: p={p}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known issues A7 and A8: calibration_predictions.csv currently does "
-        "not contain cell_id/week (dl_modeling.py, around lines 351-358), so "
-        "run_spatial_diagnostics._get_cell_residuals falls into the branch "
-        "that produces a constant residual vector (spatial_diagnostics.py, "
-        "around line 133), and the denominator degenerates to 0 -> NaN. "
-        "Verified empirically on the real outputs/: Hybrid_DL_Enhanced and "
-        "Neural_Poisson_Enhanced both give NaN already."
-    ),
-)
 def test_run_spatial_diagnostics_gives_finite_number_for_dl_models():
     out_df = run_spatial_diagnostics()
     for model_name in ("Hybrid_DL_Enhanced", "Neural_Poisson_Enhanced"):

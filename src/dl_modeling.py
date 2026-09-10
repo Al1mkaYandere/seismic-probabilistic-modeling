@@ -354,6 +354,8 @@ def _train_one_variant(
                 "y_true": y_test.astype(np.float64),
                 "mu_pred": preds.astype(np.float64),
                 "alpha_pred": alpha_pred,
+                "cell_id": test_df[CAT_COL].to_numpy(),
+                "week": test_df["week"].to_numpy(),
             }
         )
         if model_name == "Hybrid_DL_Enhanced":
