@@ -7,6 +7,23 @@ BASE_URL: str = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 START_DATE: str = "2010-01-01"
 END_DATE: str = "2024-01-01"
 MIN_MAGNITUDE: float = 3.0
+"""Lower magnitude bound of the USGS query — what was downloaded."""
+
+M_C: float = 3.0
+"""Completeness threshold used for MODELLING — above what magnitude the
+catalogue is treated as complete.
+
+This is a different quantity from MIN_MAGNITUDE, which only says what was
+requested from the archive. They coincide today, and that is a choice rather
+than a fact: mc_estimation.py estimates the real threshold at 4.5 (see
+outputs/mc_estimate.csv), and the magnitude histogram rises up to 4.3 before it
+falls, which under Gutenberg-Richter can only mean the smaller events were never
+recorded. Modelling from 3.0 therefore counts 55% of the catalogue as data when
+it is really absence of detection.
+
+Raising this is the experiment that decides whether the tail claim is about
+seismicity or about the catalogue. It is kept at 3.0 so that the published
+numbers are reproducible; nothing else in the code hard-codes a threshold."""
 
 BBOX: dict[str, float] = {
     "minlatitude": 38.0,

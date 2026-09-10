@@ -16,6 +16,7 @@ if str(_ROOT) not in sys.path:
 from src.data_ingestion import run_ingestion_pipeline
 from src.grid_builder import (
     build_spatiotemporal_grid,
+    filter_to_completeness,
     load_raw_data,
     save_processed_data,
 )
@@ -53,7 +54,10 @@ def main() -> int:
     try:
         # ── Step 1: Ingestion + Grid ──────────────────────────────────────────
         run_ingestion_pipeline()
-        raw = load_raw_data()
+        # One completeness cut for the whole run: the panel and the ETAS fit must
+        # see the same events, or the baseline is scored against a target built
+        # from a different catalogue than the one it was fitted on.
+        raw = filter_to_completeness(load_raw_data())
         processed = build_spatiotemporal_grid(raw)
         save_processed_data(processed)
 
@@ -89,7 +93,9 @@ def main() -> int:
         try:
             from src.etas_baseline import run_etas_static
             from src import config as _cfg
-            raw_for_etas = pd.read_csv(_cfg.RAW_DATA_PATH / _cfg.RAW_DATA_FILE)
+            raw_for_etas = filter_to_completeness(
+                pd.read_csv(_cfg.RAW_DATA_PATH / _cfg.RAW_DATA_FILE)
+            )
             raw_for_etas["time"] = pd.to_datetime(raw_for_etas["time"], utc=True, format="mixed").dt.tz_localize(None)
             raw_for_etas["lat_grid"] = (
                 np.floor((raw_for_etas["latitude"] - _cfg.BBOX["minlatitude"]) / _cfg.GRID_SIZE)

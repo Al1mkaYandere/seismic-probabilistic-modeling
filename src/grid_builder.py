@@ -61,6 +61,27 @@ def load_raw_data() -> pd.DataFrame:
     return df
 
 
+def filter_to_completeness(df: pd.DataFrame, m_c: float | None = None) -> pd.DataFrame:
+    """Keep only events at or above the completeness threshold.
+
+    The single place where the catalogue is cut by magnitude. Everything
+    downstream - the panel, the ETAS fit, every model - then works on one
+    consistent set of events, instead of each step deciding for itself.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Event table with a ``mag`` column.
+    m_c : float | None
+        Threshold; ``None`` means ``config.M_C``.
+    """
+    threshold = config.M_C if m_c is None else float(m_c)
+    kept = df.loc[df["mag"] >= threshold].reset_index(drop=True)
+    logger.info("Completeness filter M_c=%.2f: kept %d of %d events",
+                threshold, len(kept), len(df))
+    return kept
+
+
 def build_spatiotemporal_grid(df: pd.DataFrame) -> pd.DataFrame:
     """
     Bin events into anchored grid cells and weeks, complete the panel, add lag features.

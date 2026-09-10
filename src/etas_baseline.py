@@ -27,7 +27,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MIN_EVENTS: int = 5
-M_C_DEFAULT: float = 3.0
+def _m_c(m_c: float | None = None) -> float:
+    """Resolve the completeness threshold, reading config at CALL time.
+
+    Binding it once at import would freeze whatever config held when the module
+    was first loaded, so changing the threshold for an experiment would move the
+    panel while leaving ETAS fitted at the old one - and both would still run.
+    The ETAS likelihood is derived assuming every event above this threshold was
+    observed, so a stale copy is not a cosmetic problem.
+    """
+    return float(config.M_C) if m_c is None else float(m_c)
 WEEK_SECONDS: float = 7.0 * 24.0 * 3600.0
 
 
@@ -68,7 +77,7 @@ def _negative_log_likelihood(params: np.ndarray, t_days: np.ndarray, m: np.ndarr
 def _fit_cell(
     t_days: np.ndarray,
     m: np.ndarray,
-    m_c: float = M_C_DEFAULT,
+    m_c: float | None = None,
     seed: int | np.random.SeedSequence = 42,
 ) -> dict:
     """Fit ETAS parameters for a single cell. Returns param dict.
@@ -78,6 +87,7 @@ def _fit_cell(
     three restarts, so the three restarts stay different from each other but
     identical from run to run given the same ``seed``.
     """
+    m_c = _m_c(m_c)
     x0 = np.array([0.01, 0.1, 0.01, 1.1, 1.0])
     bounds = [(1e-6, 10.0), (1e-6, 10.0), (1e-6, 5.0), (1.001, 3.0), (0.1, 3.0)]
     best_res = None
@@ -115,7 +125,7 @@ def _predict_cell(
     hist_m: np.ndarray,
     target_week_starts_days: np.ndarray,
     week_duration_days: float = 7.0,
-    m_c: float = M_C_DEFAULT,
+    m_c: float | None = None,
 ) -> np.ndarray:
     """Integrate lambda_c over each target week to get expected counts.
 
@@ -128,6 +138,7 @@ def _predict_cell(
     training split, but the aftershock history used at prediction time may
     extend further, up to (not including) the week being predicted.
     """
+    m_c = _m_c(m_c)
     mu = params["mu"]
     K = params.get("K", 0.0)
     c = params.get("c", 0.01)
@@ -162,7 +173,7 @@ def _predict_cell(
 def fit_etas_per_cell(
     events_df: pd.DataFrame,
     train_end: pd.Timestamp,
-    m_c: float = M_C_DEFAULT,
+    m_c: float | None = None,
     seed: int = 42,
 ) -> dict[str, dict]:
     """Fit per-cell ETAS on events before train_end.
@@ -190,6 +201,7 @@ def fit_etas_per_cell(
         Mapping from cell_id to fitted parameter dict.
     """
     # Normalize time column to tz-naive for arithmetic
+    m_c = _m_c(m_c)
     events_work = events_df.copy()
     if hasattr(events_work["time"].dt, "tz") and events_work["time"].dt.tz is not None:
         events_work["time"] = events_work["time"].dt.tz_localize(None)
@@ -232,7 +244,7 @@ def predict_etas(
     params_by_cell: dict[str, dict],
     weeks_grid: pd.DataFrame,
     events_df: pd.DataFrame,
-    m_c: float = M_C_DEFAULT,
+    m_c: float | None = None,
 ) -> pd.DataFrame:
     """Predict expected counts for each (cell_id, week) in weeks_grid.
 
@@ -263,6 +275,7 @@ def predict_etas(
     pd.DataFrame
         Columns: ``cell_id``, ``week``, ``lambda_pred``.
     """
+    m_c = _m_c(m_c)
     events_work = events_df[["time", "mag", "cell_id"]].copy()
     if hasattr(events_work["time"].dt, "tz") and events_work["time"].dt.tz is not None:
         events_work["time"] = events_work["time"].dt.tz_localize(None)
@@ -322,7 +335,7 @@ def predict_etas(
 def run_etas_static(
     events_df: pd.DataFrame,
     panel_df: pd.DataFrame,
-    m_c: float = M_C_DEFAULT,
+    m_c: float | None = None,
 ) -> dict[str, float]:
     """Run ETAS on 80/20 static split of panel weeks and return metrics dict.
 
@@ -337,6 +350,7 @@ def run_etas_static(
     -------
     dict with keys MAE, RMSE, Mean_Poisson_Deviance, alpha_hat, Status.
     """
+    m_c = _m_c(m_c)
     unique_weeks = np.sort(panel_df["week"].dropna().unique())
     if len(unique_weeks) < 2:
         return {"MAE": np.nan, "RMSE": np.nan, "Mean_Poisson_Deviance": np.nan,
