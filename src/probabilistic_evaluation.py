@@ -27,10 +27,25 @@ What is scored
 * Diebold-Mariano tests on the 144 weekly mean score differences, with a
   Newey-West correction, because weeks are serially dependent after a large event.
 
-All intervals come from a block bootstrap over whole weeks: the 17 cells of one
-week are resampled together. Resampling single rows would treat an aftershock
-week as 17 independent observations and report an interval several times too
-narrow.
+All intervals come from a moving block bootstrap over runs of CONSECUTIVE weeks,
+five weeks to a block. A week is never split - its 17 cells always move together
+- but keeping a week whole is not what the method is for: the measured
+correlation between cells within a week is -0.001. What has to be preserved is
+the run, because a large event raises counts in the same cell for the weeks that
+follow (+0.052 at lag 1). Resampling single weeks independently breaks exactly
+that structure and returns an interval narrower than resampling raw rows.
+
+The block length follows the same rule as the Newey-West lag used by the
+Diebold-Mariano test, so both ways of handling serial dependence in this module
+agree on how far it reaches.
+
+Two consequences worth stating rather than hiding. Blocks of five over 144 weeks
+means 29 blocks, i.e. 145 weeks per resample instead of 144; the surplus is 0.7%
+of the sample, well inside the bias any moving block bootstrap carries anyway.
+And the interval does not always widen relative to independent weeks: where the
+weekly differences are negatively autocorrelated, consecutive weeks cancel and
+the honest interval is narrower. That is the method reproducing the dependence
+that is there, not a failure of it.
 """
 
 from __future__ import annotations
@@ -177,25 +192,63 @@ def collect_predictive_distributions() -> tuple[pd.DataFrame, list[PredictiveDis
 
 
 def _week_blocks(weeks: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Row indices of each week, in chronological order.
+
+    Weeks are sorted as strings, which is chronological for ISO dates. The order
+    matters: the bootstrap below draws runs of CONSECUTIVE weeks, so a shuffled
+    ordering would silently turn a moving-block bootstrap back into a single-week
+    one.
+    """
     unique = np.unique(weeks)
     return unique, [np.flatnonzero(weeks == w) for w in unique]
 
 
+def newey_west_lag(n_periods: int) -> int:
+    """Standard automatic lag, floor(4 * (T / 100) ** (2/9)); 4 at T = 144."""
+    return int(np.floor(4.0 * (n_periods / 100.0) ** (2.0 / 9.0)))
+
+
 def block_bootstrap_ci(values: np.ndarray, weeks: np.ndarray,
                        n_boot: int = N_BOOTSTRAP,
-                       seed: int = BOOTSTRAP_SEED) -> tuple[float, float]:
-    """Percentile interval for the mean of ``values``, resampling whole weeks.
+                       seed: int = BOOTSTRAP_SEED,
+                       block_weeks: int | None = None) -> tuple[float, float]:
+    """Percentile interval for the mean of ``values``, resampling runs of weeks.
 
-    The 17 cells of one week share the same aftershock sequence, so they are not
-    independent draws. Resampling rows would shrink the interval by roughly the
-    square root of the block size and make every difference look decisive.
+    A week is the indivisible unit - its 17 cells always move together - and the
+    bootstrap draws blocks of ``block_weeks`` CONSECUTIVE weeks.
+
+    Both halves of that matter, for different reasons, and an earlier version of
+    this function got the reasoning backwards. Keeping a week whole costs
+    nothing but buys nothing either: the measured correlation between cells
+    within a week is -0.001, so there is no within-week dependence to protect
+    against. The dependence that does exist is temporal - a large event raises
+    counts in the same cell for the following weeks, measured at +0.052 at lag 1
+    and near zero beyond - and only consecutive runs capture it. Resampling
+    single weeks independently destroys exactly the structure that needs
+    preserving, and returns an interval narrower than resampling raw rows.
+
+    The block length follows the same rule as the Newey-West lag used by the
+    Diebold-Mariano test, so the two ways of handling serial dependence in this
+    module agree on how far it reaches: 5 weeks at T = 144.
     """
     unique, blocks = _week_blocks(weeks)
+    n_weeks = len(unique)
+    if block_weeks is None:
+        block_weeks = min(newey_west_lag(n_weeks) + 1, n_weeks)
+    block_weeks = max(1, min(block_weeks, n_weeks))
+
+    n_starts = n_weeks - block_weeks + 1
+    n_blocks = int(np.ceil(n_weeks / block_weeks))
     rng = np.random.default_rng(seed)
     means = np.empty(n_boot, dtype=np.float64)
     for b in range(n_boot):
-        picked = rng.integers(0, len(unique), size=len(unique))
-        means[b] = values[np.concatenate([blocks[i] for i in picked])].mean()
+        starts = rng.integers(0, n_starts, size=n_blocks)
+        picked = np.concatenate([
+            blocks[start + offset]
+            for start in starts
+            for offset in range(block_weeks)
+        ])
+        means[b] = values[picked].mean()
     lo, hi = np.percentile(means, [2.5, 97.5])
     return float(lo), float(hi)
 
@@ -212,7 +265,7 @@ def diebold_mariano(loss_a: np.ndarray, loss_b: np.ndarray, weeks: np.ndarray,
     diffs = pd.Series(loss_a - loss_b).groupby(pd.Series(weeks)).mean().to_numpy()
     T = len(diffs)
     if lag is None:
-        lag = int(np.floor(4.0 * (T / 100.0) ** (2.0 / 9.0)))
+        lag = newey_west_lag(T)
     d_bar = float(diffs.mean())
     u = diffs - d_bar
     var = float(np.mean(u * u))

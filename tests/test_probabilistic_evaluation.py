@@ -91,19 +91,65 @@ def test_bootstrap_resamples_whole_weeks_not_rows():
 
     Built so the two are impossible to confuse: every row inside a week carries
     the same value, and the weeks differ wildly. Resampling whole weeks then
-    reproduces the bootstrap of the 4 week-values exactly, while resampling rows
-    would give a far narrower interval.
+    reproduces the bootstrap of the 4 week-values, while resampling rows would
+    give a far narrower interval.
     """
     weeks = np.repeat(["w1", "w2", "w3", "w4"], 17)
     values = np.repeat([0.0, 0.0, 0.0, 100.0], 17).astype(float)
 
-    lo, hi = pe.block_bootstrap_ci(values, weeks, n_boot=4000, seed=7)
+    lo, hi = pe.block_bootstrap_ci(values, weeks, n_boot=4000, seed=7, block_weeks=1)
 
     # With one non-zero week out of four, a whole-week resample returns a mean of
     # 0, 25, 50, 75 or 100 - so the interval has to reach 0 at the bottom and
     # well past 25 at the top. Row resampling would concentrate near 25.
     assert lo == pytest.approx(0.0, abs=1e-9)
     assert hi >= 50.0, f"upper end {hi} is too tight for whole-week resampling"
+
+
+def test_bootstrap_blocks_are_runs_of_consecutive_weeks():
+    """The interval must widen when the weeks are serially dependent.
+
+    The signal here is a long stretch of quiet weeks followed by a long stretch
+    of busy ones - the shape an aftershock sequence leaves behind. Drawing single
+    weeks independently breaks that run apart and reports an interval that is too
+    narrow; drawing runs of consecutive weeks keeps it and reports an honest one.
+
+    An earlier version of this module resampled single weeks and justified it by
+    dependence WITHIN a week. On the real panel that correlation is -0.001, while
+    consecutive weeks correlate at +0.052, so the protection was aimed at an axis
+    where nothing needed protecting.
+    """
+    n_weeks, rows_per_week = 120, 17
+    weeks = np.repeat([f"w{t:03d}" for t in range(n_weeks)], rows_per_week)
+    per_week = np.concatenate([np.zeros(n_weeks // 2), np.ones(n_weeks // 2)])
+    values = np.repeat(per_week, rows_per_week)
+
+    lo_single, hi_single = pe.block_bootstrap_ci(values, weeks, n_boot=3000,
+                                                 seed=3, block_weeks=1)
+    lo_runs, hi_runs = pe.block_bootstrap_ci(values, weeks, n_boot=3000,
+                                             seed=3, block_weeks=12)
+
+    assert (hi_runs - lo_runs) > 1.5 * (hi_single - lo_single), (
+        f"blocks of consecutive weeks gave width {hi_runs - lo_runs:.4f}, "
+        f"single weeks {hi_single - lo_single:.4f} - the runs are not being kept"
+    )
+
+
+def test_default_block_length_follows_the_newey_west_rule():
+    """One rule for how far dependence reaches, used by both tools here.
+
+    If the bootstrap and the Diebold-Mariano test disagreed about that, the paper
+    would be reporting an interval and a p-value built on different assumptions.
+    """
+    assert pe.newey_west_lag(144) == 4
+
+    n_weeks, rows_per_week = 144, 3
+    weeks = np.repeat([f"w{t:03d}" for t in range(n_weeks)], rows_per_week)
+    values = np.arange(len(weeks), dtype=float)
+
+    explicit = pe.block_bootstrap_ci(values, weeks, n_boot=800, seed=1, block_weeks=5)
+    default = pe.block_bootstrap_ci(values, weeks, n_boot=800, seed=1)
+    assert default == explicit, "the default block length is not 5 weeks at T = 144"
 
 
 def test_diebold_mariano_finds_nothing_between_identical_models():
@@ -298,3 +344,39 @@ def test_diebold_mariano_widens_the_variance_for_autocorrelated_weeks():
         f"vs {uncorrected['dm_stat']:.3f} without it"
     )
     assert corrected["p_value"] > uncorrected["p_value"]
+
+
+def test_bootstrap_ignores_the_order_rows_happen_to_sit_in():
+    """Blocks are runs in TIME, not runs in the file.
+
+    The panel on disk is sorted by cell and then by week, so the row order is an
+    artefact of how the file was written. If the block boundaries followed that
+    order instead of the calendar, the blocks would stop being consecutive weeks
+    the moment anything upstream re-sorted a file - silently, with the interval
+    still looking plausible.
+
+    Found by mutation: taking the weeks in order of first appearance instead of
+    sorted passed every other test in this file, because the fixtures happen to
+    be built in chronological order already.
+    """
+    n_weeks, rows_per_week = 60, 4
+    week_names = np.array([f"w{t:03d}" for t in range(n_weeks)])
+    per_week = np.concatenate([np.zeros(n_weeks // 2), np.ones(n_weeks // 2)])
+
+    weeks_sorted = np.repeat(week_names, rows_per_week)
+    values_sorted = np.repeat(per_week, rows_per_week)
+
+    rng = np.random.default_rng(19)
+    perm = rng.permutation(len(weeks_sorted))
+    weeks_shuffled = weeks_sorted[perm]
+    values_shuffled = values_sorted[perm]
+
+    ordered = pe.block_bootstrap_ci(values_sorted, weeks_sorted, n_boot=1500, seed=4)
+    shuffled = pe.block_bootstrap_ci(values_shuffled, weeks_shuffled, n_boot=1500, seed=4)
+
+    assert shuffled == pytest.approx(ordered, abs=1e-12), (
+        f"interval moved when the rows were shuffled: {shuffled} vs {ordered}"
+    )
+
+    unique, _blocks = pe._week_blocks(weeks_shuffled)
+    assert list(unique) == sorted(unique), "weeks are not put back in calendar order"
