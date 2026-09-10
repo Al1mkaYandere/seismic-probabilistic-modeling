@@ -19,6 +19,8 @@ import pandas as pd
 from scipy.optimize import minimize
 from sklearn.metrics import mean_absolute_error, mean_poisson_deviance, mean_squared_error
 
+from src import config
+
 if TYPE_CHECKING:
     pass
 
@@ -354,6 +356,19 @@ def run_etas_static(
     pred_df = predict_etas(params_by_cell, test_panel[["cell_id", "week"]], events_df, m_c)
     test_panel = test_panel.merge(pred_df, on=["cell_id", "week"], how="left")
     test_panel["lambda_pred"] = test_panel["lambda_pred"].fillna(0.1).clip(lower=1e-9)
+
+    # ETAS is a full Poisson predictive distribution, not just a point forecast:
+    # lambda is the mean of P(Y = k) = exp(-lambda) lambda^k / k!. The rest of the
+    # pipeline stores every other model's predictions per (cell, week), so that
+    # the probabilistic evaluation can score them all on the same 2448 rows.
+    # These were being computed and then dropped, which left the seismological
+    # baseline out of every distributional comparison.
+    out_path = config.ETAS_TEST_PREDICTIONS_CSV
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    test_panel[["cell_id", "week", "Y", "lambda_pred"]].rename(
+        columns={"Y": "y_true"}
+    ).to_csv(out_path, index=False)
+    logger.info("Saved ETAS test predictions to %s (%d rows)", out_path, len(test_panel))
 
     y_true = test_panel["Y"].astype(float).to_numpy()
     y_pred = test_panel["lambda_pred"].to_numpy()
