@@ -67,14 +67,22 @@ def _fit_cell(
     t_days: np.ndarray,
     m: np.ndarray,
     m_c: float = M_C_DEFAULT,
+    seed: int | np.random.SeedSequence = 42,
 ) -> dict:
-    """Fit ETAS parameters for a single cell. Returns param dict."""
+    """Fit ETAS parameters for a single cell. Returns param dict.
+
+    ``seed`` controls the optimizer's random restart jitter (see
+    ``x0_jitter`` below). One RNG is created per call and reused across all
+    three restarts, so the three restarts stay different from each other but
+    identical from run to run given the same ``seed``.
+    """
     x0 = np.array([0.01, 0.1, 0.01, 1.1, 1.0])
     bounds = [(1e-6, 10.0), (1e-6, 10.0), (1e-6, 5.0), (1.001, 3.0), (0.1, 3.0)]
     best_res = None
     best_val = np.inf
+    rng = np.random.default_rng(seed)
     for _ in range(3):
-        x0_jitter = x0 * np.exp(np.random.default_rng().normal(0, 0.3, size=x0.shape))
+        x0_jitter = x0 * np.exp(rng.normal(0, 0.3, size=x0.shape))
         x0_jitter = np.clip(x0_jitter, [b[0] for b in bounds], [b[1] for b in bounds])
         try:
             with warnings.catch_warnings():
@@ -143,6 +151,7 @@ def fit_etas_per_cell(
     events_df: pd.DataFrame,
     train_end: pd.Timestamp,
     m_c: float = M_C_DEFAULT,
+    seed: int = 42,
 ) -> dict[str, dict]:
     """Fit per-cell ETAS on events before train_end.
 
@@ -155,6 +164,13 @@ def fit_etas_per_cell(
         Exclusive upper bound for training events.
     m_c : float
         Magnitude of completeness threshold.
+    seed : int
+        Base seed for the optimizer's restart jitter (see ``_fit_cell``). Each
+        cell gets its own deterministic child stream spawned from this seed
+        (via ``numpy.random.SeedSequence.spawn``), in the fixed order that
+        ``groupby("cell_id")`` already sorts cells into. So cells differ from
+        each other but the whole fit is identical across repeated calls with
+        the same ``events_df``, ``train_end`` and ``seed``.
 
     Returns
     -------
@@ -177,10 +193,15 @@ def fit_etas_per_cell(
     if hasattr(origin, "tzinfo") and origin.tzinfo is not None:
         origin = origin.tz_localize(None)
 
+    seed_seq = np.random.SeedSequence(seed)
     for cell_id, grp in train.groupby("cell_id"):
         grp_sorted = grp.sort_values("time")
         t_days = (grp_sorted["time"] - origin).dt.total_seconds().to_numpy() / 86400.0
         m_arr = grp_sorted["mag"].to_numpy(dtype=np.float64)
+        # One spawn per cell, in groupby's (sorted, deterministic) order, so
+        # every cell gets its own reproducible stream regardless of whether
+        # it ends up in the fallback branch below or actually gets fitted.
+        cell_seed = seed_seq.spawn(1)[0]
         if len(t_days) < MIN_EVENTS:
             rate = len(t_days) / max((train_end - origin).total_seconds() / 86400.0, 1.0)
             params_by_cell[str(cell_id)] = {
@@ -188,7 +209,7 @@ def fit_etas_per_cell(
                 "fallback": True, "origin": origin, "train_t_days": t_days, "train_m": m_arr,
             }
         else:
-            p = _fit_cell(t_days, m_arr, m_c)
+            p = _fit_cell(t_days, m_arr, m_c, seed=cell_seed)
             p["origin"] = origin
             p["train_t_days"] = t_days
             p["train_m"] = m_arr

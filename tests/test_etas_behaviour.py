@@ -1,8 +1,11 @@
 """Behavioural checks for ETAS: response to a strong event and reproducibility.
 
-Both tests in this file are expected failures (xfail). They document known
-issues A1 and A2 (described where each xfail is declared, below). The
-synthetic catalog and the expected outcome were worked out and checked by
+The first test in this file is an expected failure (xfail) documenting known
+issue A1 (described where its xfail is declared, below). The second test used
+to document known issue A2 (unseeded optimizer restarts) but A2 is now fixed
+(see ``seed`` on ``_fit_cell``/``fit_etas_per_cell`` in ``src/etas_baseline.py``),
+so its xfail marker was removed and it now runs as a normal (passing) test.
+The synthetic catalog and the expected outcome were worked out and checked by
 hand in advance, not fitted to whatever the code currently outputs — see
 the comments inside each test.
 """
@@ -83,17 +86,6 @@ def test_etas_forecast_rises_after_strong_event_inside_forecast_period():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known issue A2: _fit_cell (etas_baseline.py, around line 77) calls "
-        "np.random.default_rng() without a seed to jitter the optimizer's "
-        "starting point. Two calls to fit_etas_per_cell on the same data "
-        "produce different parameters (mu, c, p, a) — verified empirically: "
-        "of the 5 parameters, only K matched (it was pinned at its lower "
-        "bound), the other four differed."
-    ),
-)
 def test_fit_etas_per_cell_is_reproducible_across_calls():
     events_df, train_end, _, _ = _synthetic_catalog_with_strong_event_inside_forecast_period()
 
