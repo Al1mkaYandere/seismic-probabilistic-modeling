@@ -31,24 +31,23 @@ kept outside this repository (see "Known limitation" below).
 python -m pytest tests/ -q
 ```
 
-## Expected failures (xfail)
+## Defects these tests were written against
 
-Five tests are marked `xfail` on purpose: each one documents a known,
-already-identified defect in the pipeline rather than an accidental test
-failure.
+Five tests were originally added as strict `xfail`, each documenting a known
+defect in the pipeline. All five defects have since been fixed; no `xfail`
+marker remains, and every test below now runs as a normal passing test that
+guards against the defect coming back.
 
-| Test | Known defect it documents |
-| --- | --- |
-| `test_distributions.py::test_poisson_nll_missing_log_factorial` | `_poisson_nll` omits the `log(y!)` normalising constant, so it does not equal the true Poisson NLL and is not directly comparable to the NB NLL. |
-| `test_etas_behaviour.py::test_etas_forecast_rises_after_strong_event_inside_forecast_period` | `predict_etas` only sees events up to the training cut-off, so it does not react to a strong event that occurs during the forecast period. |
-| `test_etas_behaviour.py::test_fit_etas_per_cell_is_reproducible_across_calls` | ETAS fitting jitters its optimizer's starting point with an unseeded random generator, so two fits on identical data can converge to different parameters. |
-| `test_walkforward_split.py::test_validation_slice_has_all_cells_and_is_latest_by_time` | The walk-forward validation slice is taken by row position from a panel sorted by cell, not by time, so it can miss most spatial cells and pull in old data instead of the most recent months. |
-| `test_moran.py::test_run_spatial_diagnostics_gives_finite_number_for_dl_models` | Residual diagnostics for the deep-learning models currently return `NaN` because the calibration output they read is missing the columns needed to compute per-cell residuals. |
+| Test | Defect it guards against | Fixed in |
+| --- | --- | --- |
+| `test_distributions.py::test_poisson_nll_missing_log_factorial` | `_poisson_nll` omitted the `log(y!)` normalising constant, so it did not equal the true Poisson NLL and was not comparable to the NB NLL. | `4f9aafc` |
+| `test_etas_behaviour.py::test_fit_etas_per_cell_is_reproducible_across_calls` | ETAS fitting jittered its optimizer's starting point with an unseeded random generator, so two fits on identical data converged to different parameters. | `ae1a9d9` |
+| `test_moran.py::test_run_spatial_diagnostics_gives_finite_number_for_dl_models` | Residual diagnostics for the deep-learning models returned `NaN`, because the calibration output they read was missing the columns needed to compute per-cell residuals. | `e3dbbb7` |
+| `test_walkforward_split.py::test_validation_block_is_latest_weeks_and_keeps_every_cell` | The walk-forward validation slice was taken by row position from a panel sorted by cell, not by time, so it missed most spatial cells and pulled in old data instead of the most recent months. | `a540fd8` |
+| `test_etas_behaviour.py::test_etas_forecast_rises_after_strong_event_inside_forecast_period` | `predict_etas` only saw events up to the training cut-off, so it did not react to a strong event occurring during the forecast period. | `3c66613` |
 
-All five are marked `strict=True`: once the underlying defect is fixed, the
-test will unexpectedly pass (`XPASS`), which `strict=True` turns into a hard
-failure — a deliberate signal that the `xfail` marker must be removed at
-that point.
+Each fix was checked by mutation: the defect was reintroduced into the
+production code and the corresponding test was confirmed to fail again.
 
 ## Known limitation
 

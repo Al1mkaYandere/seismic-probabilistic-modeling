@@ -1,10 +1,12 @@
 """Behavioural checks for the distributions: NB/Poisson NLL and discrete CRPS.
 
-One test in this file is an expected failure (xfail). It documents known
-issue A5: ``_poisson_nll`` in src/tail_metrics.py omits the log(y!)
-normalising constant, so its output is not the true Poisson negative
-log-likelihood and is not directly comparable to NB NLL, which does include
-that constant.
+``test_poisson_nll_missing_log_factorial`` used to be an expected failure
+(xfail) documenting known issue A5: ``_poisson_nll`` in src/tail_metrics.py
+omitted the log(y!) normalising constant, so its output was not the true
+Poisson negative log-likelihood and was not comparable to NB NLL, which does
+include that constant. A5 was fixed in ``4f9aafc``; the xfail marker is gone
+and the test now guards against the constant being dropped again. Its name is
+kept as-is so the defect it came from stays findable in the history.
 """
 from __future__ import annotations
 
