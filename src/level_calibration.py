@@ -50,11 +50,15 @@ def level_multiplier(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
     Scaling every forecast by a constant divides this multiplier by the same
     constant, so the corrected forecast is unchanged. That identity is what the
-    correction rests on, and it holds while the totals stay in a range float64
-    can represent: a review found it degenerating below about 1e-9 of the
-    original scale, where the predicted total sinks under the guard below and
-    the multiplier is refused rather than computed. Forecast totals anywhere
-    near that are meaningless anyway.
+    correction rests on, and it holds to within a last-bit rounding difference -
+    measured at no more than 4e-16 relative, and exactly zero only when the
+    constant is a power of two - across constants from 1e-9 to 1e300.
+
+    It fails at each end for a different reason. Below about 1e-9 of the original
+    scale the predicted total sinks under the guard below, and the multiplier is
+    refused rather than computed, so the corrected metrics vanish instead of
+    being wrong; forecast totals anywhere near that are meaningless anyway. At
+    1e308 the squared error overflows and RMSE goes to infinity.
     """
     predicted_total = float(np.sum(y_pred))
     if not np.isfinite(predicted_total) or predicted_total <= MIN_PREDICTED_TOTAL:

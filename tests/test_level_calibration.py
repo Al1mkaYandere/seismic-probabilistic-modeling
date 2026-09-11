@@ -72,11 +72,17 @@ def test_multiplier_is_fitted_on_earlier_years_and_cannot_see_the_scored_one() -
 
 
 def test_scaling_a_forecast_leaves_the_calibrated_metrics_identical() -> None:
-    """The exact identity the correction rests on.
+    """The identity the correction rests on.
 
     Multiply every forecast of one model by any constant and the fitted
     multiplier divides by the same constant, so the corrected forecast - and
-    therefore every corrected metric - must come out bit for bit the same.
+    therefore every corrected metric - must come out the same to within a
+    last-bit rounding difference. Hence rel=1e-12 below, which is four orders of
+    magnitude tighter than any real change to the calculation could hide in, and
+    not exact equality: that holds only when the constant is a power of two.
+    Earlier wording here promised "bit for bit", which is false and sent a later
+    reader hunting for a defect that does not exist.
+
     A "the numbers moved" check would pass even if the correction reached only
     half of the calculation; this cannot.
     """
