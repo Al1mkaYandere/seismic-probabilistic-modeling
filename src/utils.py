@@ -34,17 +34,21 @@ def setup_logging() -> None:
 
 def ensure_project_directories() -> None:
     """
-    Create standard project directories if they do not exist.
+    Create the directories the run is configured to use, if they do not exist.
 
-    Creates ``data/raw``, ``data/processed``, ``notebooks``, and ``outputs/figures``
-    under the project root.
+    Every path comes from ``config`` rather than from a literal, so a run
+    pointed at another output directory creates THAT directory instead of
+    quietly adding an empty one inside the published tree. ``notebooks`` is
+    the one directory with no configured location; it is not written to by
+    the pipeline and stays at the project root.
     """
-    root = get_project_root()
-    for relative in (
-        Path("data") / "raw",
-        Path("data") / "processed",
-        Path("notebooks"),
-        Path("outputs") / "figures",
+    from src import config
+
+    for path in (
+        config.RAW_DATA_PATH,
+        config.PROCESSED_DATA_PATH,
+        get_project_root() / "notebooks",
+        config.OUTPUT_DIR,
+        config.FIGURES_DIR,
     ):
-        path = root / relative
         path.mkdir(parents=True, exist_ok=True)
