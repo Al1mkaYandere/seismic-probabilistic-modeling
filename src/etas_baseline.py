@@ -384,6 +384,22 @@ def run_etas_static(
     ).to_csv(out_path, index=False)
     logger.info("Saved ETAS test predictions to %s (%d rows)", out_path, len(test_panel))
 
+    # The same intensities on the TRAINING weeks. Anything fitted on top of this
+    # baseline - a dispersion parameter, a level correction - has to be fitted
+    # somewhere, and fitting it on the test split would be reading the answer.
+    # Each training week still sees only the events before it, so this adds no
+    # information that was not already available when the parameters were fitted.
+    train_panel = panel_df[panel_df["week"].isin(train_weeks)][["cell_id", "week", "Y"]].copy()
+    train_pred = predict_etas(params_by_cell, train_panel[["cell_id", "week"]], events_df, m_c)
+    train_panel = train_panel.merge(train_pred, on=["cell_id", "week"], how="left")
+    train_panel["lambda_pred"] = train_panel["lambda_pred"].fillna(0.1).clip(lower=1e-9)
+    train_out = config.ETAS_TRAIN_PREDICTIONS_CSV
+    train_panel[["cell_id", "week", "Y", "lambda_pred"]].rename(
+        columns={"Y": "y_true"}
+    ).to_csv(train_out, index=False)
+    logger.info("Saved ETAS training-period intensities to %s (%d rows)",
+                train_out, len(train_panel))
+
     y_true = test_panel["Y"].astype(float).to_numpy()
     y_pred = test_panel["lambda_pred"].to_numpy()
     mae = float(mean_absolute_error(y_true, y_pred))
