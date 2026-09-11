@@ -56,6 +56,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize_scalar
+from scipy.special import gammaln
 from scipy.stats import nbinom, norm, poisson
 
 from src import config
@@ -79,6 +81,10 @@ COMPARISON_PAIRS: tuple[tuple[str, str], ...] = (
     ("Hybrid_DL_Enhanced", "Neural_Poisson_Enhanced"),
     ("NB_GLM", "ETAS_Per_Cell"),
     ("Neural_Poisson_Enhanced", "ETAS_Per_Cell"),
+    # Does one extra parameter rescue the seismological baseline, and does the
+    # network still have anything on it once it has that parameter?
+    ("ETAS_NB", "ETAS_Per_Cell"),
+    ("Hybrid_DL_Enhanced", "ETAS_NB"),
 )
 
 
@@ -131,6 +137,40 @@ class PredictiveDistribution:
         return (F - (y[:, None] <= ks[None, :]).astype(np.float64)) ** 2
 
 
+def fit_dispersion(y: np.ndarray, mu: np.ndarray) -> float:
+    """Maximum-likelihood dispersion for a mean that is already fixed.
+
+    The intensity comes from a model that has already been fitted; only the
+    spread around it is estimated here, as the single parameter of a negative
+    binomial with variance mu + alpha * mu^2. That is the cheapest possible
+    upgrade to a Poisson baseline, and it is the first thing a reader will try:
+    if a claim about tail calibration dissolves the moment the baseline is given
+    one extra parameter, it was a claim about the distribution, not the model.
+
+    Returns 0.0 when the data are not overdispersed relative to the mean. Zero
+    is the Poisson limit and only a limit - the caller must not turn it into a
+    negative binomial with alpha = 0, because 1/alpha is infinite there.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    mu = np.clip(np.asarray(mu, dtype=np.float64), 1e-12, None)
+
+    def negative_log_likelihood(log_alpha: float) -> float:
+        alpha = float(np.exp(log_alpha))
+        r = 1.0 / alpha
+        return -float(np.sum(
+            gammaln(y + r) - gammaln(r) - gammaln(y + 1.0)
+            + r * np.log(r / (r + mu)) + y * np.log(mu / (r + mu))
+        ))
+
+    result = minimize_scalar(negative_log_likelihood, bounds=(np.log(1e-8), np.log(1e4)),
+                             method="bounded", options={"xatol": 1e-10})
+    alpha = float(np.exp(result.x))
+
+    # At the lower bound the likelihood is still climbing towards Poisson, which
+    # is what "no overdispersion" looks like from this side.
+    return 0.0 if alpha <= 1e-7 else alpha
+
+
 def collect_predictive_distributions() -> tuple[pd.DataFrame, list[PredictiveDistribution]]:
     """Assemble every model's predictive distribution on the same test rows.
 
@@ -161,8 +201,26 @@ def collect_predictive_distributions() -> tuple[pd.DataFrame, list[PredictiveDis
     merged = keys.merge(etas[["cell_id", "week", "lambda_pred"]], on=["cell_id", "week"], how="left")
     if merged["lambda_pred"].isna().any():
         raise ValueError("ETAS predictions do not cover every test row")
-    dists.append(PredictiveDistribution("ETAS_Per_Cell", "poisson",
-                                        merged["lambda_pred"].to_numpy(float)))
+    etas_lambda = merged["lambda_pred"].to_numpy(float)
+    dists.append(PredictiveDistribution("ETAS_Per_Cell", "poisson", etas_lambda))
+
+    # The same intensity, one extra parameter. Fitted on the training period -
+    # fitting the spread on the split being scored would hand the baseline the
+    # answer, and a baseline that has seen the answer cannot lose honestly.
+    train_path = config.ETAS_TRAIN_PREDICTIONS_CSV
+    if train_path.exists():
+        train = pd.read_csv(train_path)
+        alpha_etas = fit_dispersion(train["y_true"].to_numpy(float),
+                                    train["lambda_pred"].to_numpy(float))
+        logger.info("ETAS dispersion fitted on the training period: alpha=%.4f", alpha_etas)
+        if alpha_etas > 0:
+            dists.append(PredictiveDistribution("ETAS_NB", "nb", etas_lambda,
+                                                np.full(len(etas_lambda), alpha_etas)))
+        else:
+            logger.info("ETAS shows no overdispersion on the training period; "
+                        "ETAS_NB would be identical to ETAS_Per_Cell and is not added")
+    else:
+        logger.warning("ETAS training intensities missing; ETAS_NB not scored")
 
     calib = pd.read_csv(config.CALIBRATION_PREDICTIONS_CSV)
     hybrid_mu: np.ndarray | None = None
