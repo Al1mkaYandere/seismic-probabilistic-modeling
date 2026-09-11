@@ -93,6 +93,7 @@ def _fit_nb_mle_glm(y: np.ndarray, X_sm: np.ndarray) -> tuple:
 
 # The split rule lives in src/splitting.py: the static protocol needs the same
 # one, and this module cannot be imported from there without a cycle.
+from src.grid_builder import filter_to_completeness  # noqa: E402
 from src.splitting import VAL_FRACTION, temporal_validation_split  # noqa: E402
 
 __all__ = ["VAL_FRACTION", "temporal_validation_split"]
@@ -240,7 +241,19 @@ def run_walk_forward(seed: int = SEED) -> pd.DataFrame:
     raw_path = config.RAW_DATA_PATH / config.RAW_DATA_FILE
     raw_df: pd.DataFrame | None = None
     try:
-        raw_df = pd.read_csv(raw_path)
+        # The same completeness cut the panel was built with. Without it the
+        # baseline is fitted on one catalogue and scored against a target built
+        # from another: at M_c = 4.5 the fit saw all 1607 events while Y counted
+        # only the 722 above the threshold, and ETAS then promised 560 events
+        # against the 308 that happened - the same 561 it promises at 3.0, as if
+        # the catalogue had not been thinned at all. main.py has always applied
+        # the cut for the static protocol, and says why in a comment there; this
+        # function read the raw file directly.
+        #
+        # At M_c = 3.0 the filter removes nothing, because 3.0 is also the lower
+        # bound of what was downloaded. That is why the defect only ever showed
+        # at the honest threshold - which is the one the thesis now rests on.
+        raw_df = filter_to_completeness(pd.read_csv(raw_path))
         raw_df["time"] = pd.to_datetime(raw_df["time"], utc=True, format="mixed").dt.tz_localize(None)
         # Add cell_id to raw_df by spatial binning
         min_lat = config.BBOX["minlatitude"]
