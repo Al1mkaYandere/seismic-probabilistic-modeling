@@ -51,6 +51,13 @@ can reorder the queue: "the result does not depend on the position" is the
 property being guarded, and it cannot be checked from outside otherwise.
 """
 
+AUDITED_MODEL: str = "Hybrid_DL_Enhanced"
+"""The model whose dispersion the alpha audit describes.
+
+Named once: the audit is about the network the paper reports, and the
+five-seed sweep trains a model of the same name five more times.
+"""
+
 STATIC_VAL_FRACTION: float = 0.1
 """Share of the training period's weeks held out for early stopping.
 
@@ -404,8 +411,6 @@ def _train_one_variant(
                 "week": test_df["week"].to_numpy(),
             }
         )
-        if model_name == "Hybrid_DL_Enhanced":
-            _save_alpha_audit(alpha_pred)
 
     result = {
         "model": model_name,
@@ -515,6 +520,14 @@ def run_dl_modeling() -> pd.DataFrame:
             rows.append(row)
             if calib_df is not None:
                 calib_parts.append(calib_df)
+                # The audit belongs to the model the paper's table 1 reports, so it is
+                # written here and not inside the training function. It used to be
+                # written in there for any model called Hybrid_DL_Enhanced, and
+                # run_alpha_identifiability trains exactly that model once per seed -
+                # so the file the run ended with described whichever seed came last
+                # (999), not the model in the table. That was true in v1 as well.
+                if model_name == AUDITED_MODEL:
+                    _save_alpha_audit(calib_df["alpha_pred"].to_numpy(dtype=np.float64))
         except Exception as exc:
             logger.warning("DL model %s failed: %s", model_name, exc)
             rows.append(
