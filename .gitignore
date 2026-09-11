@@ -4,6 +4,8 @@ sandbox/
 # Generated pipeline artifacts
 outputs/*
 !outputs/.gitkeep
+# A run at another completeness threshold writes here; same rule as outputs/
+outputs-mc*/
 
 # Python / Jupyter
 __pycache__/
