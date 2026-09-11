@@ -382,6 +382,18 @@ def _train_one_variant(
             if alpha_parts
             else np.zeros_like(y_test, dtype=np.float64)
         )
+        if loss_kind == "poisson":
+            # The network has an alpha head whatever the loss, but PoissonLoss
+            # ignores its alpha argument, so that head never receives a gradient
+            # and its output stays a random projection of the trained layers -
+            # median 0.77, against 4.27 for the one that was actually fitted.
+            #
+            # Writing it invites a reader to use it, and a consumer already did:
+            # spatial_diagnostics averaged this column and scored the Poisson
+            # network's residuals against a negative binomial variance built from
+            # that random number. NaN says "this model has no dispersion" in a way
+            # that cannot be mistaken for a small one.
+            alpha_pred = np.full(len(alpha_pred), np.nan, dtype=np.float64)
         calib_df = pd.DataFrame(
             {
                 "model": model_name,

@@ -62,6 +62,23 @@ def _morans_i(x: np.ndarray, W: np.ndarray) -> float:
     return numerator / denominator
 
 
+def _mean_dispersion(alpha: np.ndarray | None) -> float | None:
+    """Average dispersion over the rows that have one, or None when none do.
+
+    A model that never fitted a dispersion reports NaN rather than a number, so
+    the plain mean of the column is NaN. ``_residuals`` would fall back to the
+    Poisson variance on a NaN anyway, but only after the NaN had travelled
+    through everything else that reads this value. Saying None here keeps the
+    distinction between "no dispersion" and "a dispersion that happens to be
+    small" where it belongs.
+    """
+    if alpha is None:
+        return None
+    values = np.asarray(alpha, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    return float(np.mean(values)) if values.size else None
+
+
 def _residuals(y: np.ndarray, mu: np.ndarray, alpha: float | None) -> np.ndarray:
     """Pearson-style residual (y - mu) / sqrt(Var); NB variance if alpha is given."""
     if alpha is not None and np.isfinite(alpha) and alpha > 0:
@@ -111,7 +128,7 @@ def _weekly_moran(models_to_check: list[dict], comparison_df: pd.DataFrame,
             y = m["y_true"]
             mu = m["mu_pred"]
             alpha_arr = m.get("alpha_pred")
-            alpha_scalar = float(np.mean(alpha_arr)) if alpha_arr is not None else None
+            alpha_scalar = _mean_dispersion(alpha_arr)
             cell_ids_arr = m.get("cell_id")
             weeks_arr = m.get("week")
         else:
@@ -272,7 +289,7 @@ def run_spatial_diagnostics(out_dir: Path | None = None) -> pd.DataFrame:
                 y = m["y_true"]
                 mu = m["mu_pred"]
                 alpha_arr = m.get("alpha_pred")
-                alpha_scalar = float(np.mean(alpha_arr)) if alpha_arr is not None else None
+                alpha_scalar = _mean_dispersion(alpha_arr)
                 cell_ids_arr = m.get("cell_id")
                 cell_r = _get_cell_residuals(y, mu, alpha_scalar, cell_ids_arr)
             else:
