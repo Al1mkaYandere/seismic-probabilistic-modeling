@@ -37,6 +37,19 @@ FEATURES_ENHANCED = [
 CAT_COL = "cell_id"
 TARGET_COL = "Y"
 
+DL_VARIANTS: tuple[tuple[list[str], str, str], ...] = (
+    (FEATURES_BASELINE, "Hybrid_DL_Baseline", "nb"),
+    (FEATURES_ENHANCED, "Hybrid_DL_Enhanced", "nb"),
+    (FEATURES_BASELINE, "Neural_Poisson_Baseline", "poisson"),
+    (FEATURES_ENHANCED, "Neural_Poisson_Enhanced", "poisson"),
+)
+"""The static protocol's four models, in the order the paper's table 1 lists them.
+
+A module constant rather than a literal inside ``run_dl_modeling`` so that a test
+can reorder the queue: "the result does not depend on the position" is the
+property being guarded, and it cannot be checked from outside otherwise.
+"""
+
 BATCH_SIZE = 64
 EPOCHS = 100
 PATIENCE = 10
@@ -446,18 +459,24 @@ def run_dl_modeling() -> pd.DataFrame:
     pd.DataFrame
         Four rows: NB (baseline/enhanced) and Neural Poisson (baseline/enhanced).
     """
-    _set_seed(SEED)
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     df = _load_df()
     rows: list[dict[str, float | str]] = []
     calib_parts: list[pd.DataFrame] = []
-    for features, model_name, loss_kind in (
-        (FEATURES_BASELINE, "Hybrid_DL_Baseline", "nb"),
-        (FEATURES_ENHANCED, "Hybrid_DL_Enhanced", "nb"),
-        (FEATURES_BASELINE, "Neural_Poisson_Baseline", "poisson"),
-        (FEATURES_ENHANCED, "Neural_Poisson_Enhanced", "poisson"),
-    ):
+    for features, model_name, loss_kind in DL_VARIANTS:
+        # Every model starts from the same generator state, so its numbers do not
+        # depend on where it sits in the queue. Seeding once before the loop left
+        # each model drawing from whatever the previous one had consumed, and the
+        # same model came out 4.16% apart in Poisson deviance depending on its
+        # position - larger than both effects table 1 was measuring (3.67% and
+        # 2.67%), and enough to reverse their sign. The walk-forward protocol has
+        # always seeded per model (validation.set_seeds); this brings the static
+        # one in line.
+        #
+        # Nothing random happens between here and _train_one_variant, so the
+        # model that used to be trained first is unaffected by the move.
+        _set_seed(SEED)
         try:
             row, calib_df = _train_one_variant(df, features, model_name, loss_kind=loss_kind)
             rows.append(row)
