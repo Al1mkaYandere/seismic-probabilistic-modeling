@@ -306,6 +306,11 @@ def _train_one_variant(
     c_val, _ = _encode_cells(train_df[CAT_COL], val_df[CAT_COL])
     c_test, _ = _encode_cells(train_df[CAT_COL], test_df[CAT_COL])
 
+    # Shuffling draws from the global torch generator, which _set_seed has just
+    # set - so the seed reaches it, but through global state rather than through
+    # a Generator object the way validation._dl_train_predict does it. The two
+    # protocols differ here as they differ in several other ways; naming it is
+    # cheaper than unifying it while the published numbers depend on both.
     train_loader = DataLoader(EarthquakeDataset(X_train_s, c_train, y_train), batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(EarthquakeDataset(X_val_s, c_val, y_val), batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(EarthquakeDataset(X_test_s, c_test, y_test.astype(np.float32)), batch_size=BATCH_SIZE, shuffle=False)
@@ -488,9 +493,18 @@ def run_alpha_identifiability(seeds: list[int] | None = None) -> pd.DataFrame:
     return summary_df
 
 
-def run_dl_modeling() -> pd.DataFrame:
+def run_dl_modeling(seed: int = SEED) -> pd.DataFrame:
     """
     Run DL ablation for two feature sets and return metrics DataFrame.
+
+    Parameters
+    ----------
+    seed : int
+        Generator state every model starts from. A parameter rather than the
+        module constant because the spread of these numbers over seeds is itself
+        a result the paper has to report: the same model moved 4.16% on the
+        order it was trained in, which is larger than the effects table 1
+        measures, so a single run cannot say whether those effects exist.
 
     Returns
     -------
@@ -514,7 +528,7 @@ def run_dl_modeling() -> pd.DataFrame:
         #
         # Nothing random happens between here and _train_one_variant, so the
         # model that used to be trained first is unaffected by the move.
-        _set_seed(SEED)
+        _set_seed(seed)
         try:
             row, calib_df = _train_one_variant(df, features, model_name, loss_kind=loss_kind)
             rows.append(row)

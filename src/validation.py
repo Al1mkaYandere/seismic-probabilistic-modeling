@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src import config
 from src.dl_modeling import (
+    SEED,
     EarlyStopping,
     HybridModel,
     NegativeBinomialLoss,
@@ -44,7 +45,7 @@ OUTPUT_WF_CSV = config.WALK_FORWARD_RESULTS_CSV
 OUTPUT_WF_FIG = config.WALK_FORWARD_STABILITY_FIG
 
 
-def set_seeds(seed: int = 42) -> None:
+def set_seeds(seed: int = SEED) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -108,7 +109,7 @@ def _dl_train_predict(
     n_features: int,
     device: torch.device,
     loss_kind: str = "nb",
-    seed: int = 42,
+    seed: int = SEED,
 ) -> np.ndarray:
     """Train a DL model and return test predictions (mu only)."""
     set_seeds(seed)
@@ -212,8 +213,12 @@ def fold_prediction_rows(
     return rows
 
 
-def run_walk_forward() -> pd.DataFrame:
-    set_seeds(42)
+def run_walk_forward(seed: int = SEED) -> pd.DataFrame:
+    """Year-by-year validation. ``seed`` is the generator state every fold starts
+    from; it is a parameter so the spread of these numbers over seeds can be
+    measured, which a single run cannot say anything about.
+    """
+    set_seeds(seed)
 
     processed_path = config.PROCESSED_DATA_PATH / config.PROCESSED_DATA_FILE
     df = pd.read_csv(processed_path)
@@ -313,7 +318,7 @@ def run_walk_forward() -> pd.DataFrame:
             preds_dl = _dl_train_predict(
                 X_train_scaled, y_train, c_train_arr, df_train["week"].to_numpy(),
                 X_test_scaled, c_test_arr, num_cells,
-                len(FEATURES_ENHANCED), device, loss_kind="nb",
+                len(FEATURES_ENHANCED), device, loss_kind="nb", seed=seed,
             )
             mae_dl = float(mean_absolute_error(y_test, preds_dl))
             rmse_dl = float(np.sqrt(mean_squared_error(y_test, preds_dl)))
@@ -334,7 +339,7 @@ def run_walk_forward() -> pd.DataFrame:
             preds_np = _dl_train_predict(
                 X_train_scaled, y_train, c_train_arr, df_train["week"].to_numpy(),
                 X_test_scaled, c_test_arr, num_cells,
-                len(FEATURES_ENHANCED), device, loss_kind="poisson",
+                len(FEATURES_ENHANCED), device, loss_kind="poisson", seed=seed,
             )
             mae_np = float(mean_absolute_error(y_test, preds_np))
             rmse_np = float(np.sqrt(mean_squared_error(y_test, preds_np)))
