@@ -13,6 +13,8 @@ actual behaviour rather than a re-implementation of it.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -209,3 +211,135 @@ def test_output_carries_exactly_the_declared_columns():
     assert list(panel.columns) == FINAL_COLUMNS
     for leaked in ("mag_max", "mag_min", "energy_sum", "energy"):
         assert leaked not in panel.columns, f"intermediate column {leaked} reached the output"
+
+
+# ── Pinning the time axis (step Mc-3b) ───────────────────────────────────────
+
+def _real_catalogue() -> pd.DataFrame:
+    return pd.read_csv(Path(__file__).resolve().parent.parent / "data" / "raw"
+                       / "usgs_central_asia_raw.csv")
+
+
+def _week_bounds(events: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
+    weeks = (pd.to_datetime(events["time"], utc=True, format="mixed")
+             .dt.tz_localize(None).dt.to_period("W").dt.start_time)
+    return weeks.min(), weeks.max()
+
+
+def test_pinned_axis_keeps_two_thresholds_on_the_same_weeks() -> None:
+    """The comparison the pinning exists for: same weeks at 3.0 and at 4.5.
+
+    Without it the 4.5 catalogue has no events in the last week of the period,
+    the axis ends a week earlier, and the 80/20 split lands on a different date -
+    so a difference blamed on the completeness threshold would partly be a
+    difference of test windows.
+    """
+    from src.grid_builder import build_spatiotemporal_grid, filter_to_completeness
+
+    raw = _real_catalogue()
+    at_30 = build_spatiotemporal_grid(filter_to_completeness(raw.copy(), 3.0))
+    weeks_30 = np.sort(pd.to_datetime(at_30["week"]).unique())
+
+    free = build_spatiotemporal_grid(filter_to_completeness(raw.copy(), 4.5))
+    weeks_free = np.sort(pd.to_datetime(free["week"]).unique())
+    assert len(weeks_free) < len(weeks_30), (
+        "the premise no longer holds: raising the threshold no longer shortens the axis"
+    )
+
+    pinned = build_spatiotemporal_grid(
+        filter_to_completeness(raw.copy(), 4.5),
+        week_bounds=_week_bounds(filter_to_completeness(raw.copy(), 3.0)),
+    )
+    weeks_pinned = np.sort(pd.to_datetime(pinned["week"]).unique())
+    assert list(weeks_pinned) == list(weeks_30), "the pinned axis is not the 3.0 axis"
+
+    def split_week(weeks: np.ndarray) -> pd.Timestamp:
+        return pd.Timestamp(weeks[int(np.floor(0.8 * len(weeks)))])
+
+    assert split_week(weeks_free) != split_week(weeks_30), "the premise no longer holds"
+    assert split_week(weeks_pinned) == split_week(weeks_30)
+
+
+def test_pinning_adds_empty_weeks_as_zeros_and_loses_no_event() -> None:
+    """Extending the axis may only add rows with Y = 0, never move a count."""
+    from src.grid_builder import build_spatiotemporal_grid, filter_to_completeness
+
+    raw = _real_catalogue()
+    events = filter_to_completeness(raw.copy(), 4.5)
+    free = build_spatiotemporal_grid(events.copy())
+    pinned = build_spatiotemporal_grid(
+        events.copy(), week_bounds=_week_bounds(filter_to_completeness(raw.copy(), 3.0))
+    )
+
+    assert int(pinned["Y"].sum()) == int(free["Y"].sum()), "pinning changed the event count"
+    assert pinned["cell_id"].nunique() == free["cell_id"].nunique()
+
+    added = sorted(set(pd.to_datetime(pinned["week"])) - set(pd.to_datetime(free["week"])))
+    assert added, "the pinned axis added no week - the test proves nothing"
+    for week in added:
+        rows = pinned[pd.to_datetime(pinned["week"]) == week]
+        assert len(rows) == pinned["cell_id"].nunique(), "an added week is missing cells"
+        assert int(rows["Y"].sum()) == 0, "an added week carries events out of nowhere"
+
+    common = pinned.merge(free, on=["cell_id", "week"], suffixes=("_p", "_f"))
+    assert len(common) == len(free)
+    assert (common["Y_p"].to_numpy() == common["Y_f"].to_numpy()).all(), "a count moved"
+
+
+def test_bounds_that_would_cut_off_events_are_refused() -> None:
+    """Narrower bounds must fail loudly, not drop events into silence."""
+    from src.grid_builder import build_spatiotemporal_grid, filter_to_completeness
+
+    events = filter_to_completeness(_real_catalogue(), 4.5)
+    lo, hi = _week_bounds(events)
+    with pytest.raises(ValueError, match="would drop events"):
+        build_spatiotemporal_grid(events.copy(), week_bounds=(lo + pd.Timedelta(weeks=4), hi))
+    with pytest.raises(ValueError, match="would drop events"):
+        build_spatiotemporal_grid(events.copy(), week_bounds=(lo, hi - pd.Timedelta(weeks=4)))
+
+
+def test_pinning_restores_an_emptied_START_of_the_axis_too() -> None:
+    """Both ends are pinned, not just the late one.
+
+    The real catalogue cannot show this: raising the threshold to 4.5 empties
+    only its final week, so pinning the start is a no-op there and a defect that
+    pins only the end would pass every test above. A synthetic catalogue whose
+    EARLY events are all small makes the difference visible - and it matters,
+    because the axis start sets where the per-cell warm-up window falls, so a
+    start that moves silently shifts every lag feature in the panel.
+    """
+    origin = pd.Timestamp("2015-01-05", tz="UTC")
+    rows = [{"time": origin + pd.Timedelta(weeks=w), "latitude": 39.0,
+             "longitude": 66.0, "mag": 3.5} for w in range(0, 6)]        # small, early
+    rows += [{"time": origin + pd.Timedelta(weeks=w), "latitude": 39.0,
+              "longitude": 66.0, "mag": 4.8} for w in range(6, 40)]      # large, later
+    catalogue = pd.DataFrame(rows)
+
+    full_bounds = (origin.tz_localize(None).to_period("W").start_time,
+                   (origin + pd.Timedelta(weeks=39)).tz_localize(None).to_period("W").start_time)
+
+    large_only = catalogue[catalogue["mag"] >= 4.5].reset_index(drop=True)
+    free = build_spatiotemporal_grid(large_only.copy())
+    pinned = build_spatiotemporal_grid(large_only.copy(), week_bounds=full_bounds)
+
+    first_free = pd.to_datetime(free["week"]).min()
+    first_pinned = pd.to_datetime(pinned["week"]).min()
+    assert first_free > first_pinned, (
+        "the premise no longer holds: dropping the early small events no longer "
+        "moves the start of the axis"
+    )
+    assert first_pinned == pd.to_datetime(
+        build_spatiotemporal_grid(catalogue.copy())["week"]
+    ).min(), "the pinned start does not match the full catalogue's start"
+
+    # Moving the START of the axis moves the warm-up window with it - the first
+    # W_MAX weeks PER CELL are dropped - so the two panels legitimately retain
+    # different numbers of events. Counted here from the catalogue rather than
+    # compared against each other: with the axis pinned, the panel keeps every
+    # large event from week W_MAX of the period onwards.
+    kept = sum(1 for w in range(6, 40) if w >= W_MAX)
+    assert int(pinned["Y"].sum()) == kept, "the pinned panel lost or invented events"
+    assert int(free["Y"].sum()) < kept, (
+        "the premise no longer holds: the free axis was supposed to eat more "
+        "events as warm-up"
+    )

@@ -82,7 +82,10 @@ def filter_to_completeness(df: pd.DataFrame, m_c: float | None = None) -> pd.Dat
     return kept
 
 
-def build_spatiotemporal_grid(df: pd.DataFrame) -> pd.DataFrame:
+def build_spatiotemporal_grid(
+    df: pd.DataFrame,
+    week_bounds: tuple[pd.Timestamp, pd.Timestamp] | None = None,
+) -> pd.DataFrame:
     """
     Bin events into anchored grid cells and weeks, complete the panel, add lag features.
 
@@ -90,6 +93,23 @@ def build_spatiotemporal_grid(df: pd.DataFrame) -> pd.DataFrame:
     ----------
     df : pd.DataFrame
         Event-level data with columns including time, latitude, longitude, mag.
+    week_bounds : tuple[pd.Timestamp, pd.Timestamp] | None
+        First and last week of the panel's time axis. ``None`` (the default,
+        and what the published run uses) takes them from the events themselves:
+        the axis then runs from the first week that contains an event to the
+        last one that does.
+
+        That default quietly ties the axis to the catalogue being binned, which
+        matters as soon as two catalogues are compared. Raising the completeness
+        threshold to 4.5 empties the final week of the period, the axis loses
+        it, and the 80/20 split moves a week earlier - so a comparison meant to
+        be about the threshold would partly be about a shifted test window.
+        Pinning the bounds to the other catalogue's axis removes that.
+
+        A week with no events anywhere is a real zero within the observation
+        period, not a gap in the data, so extending the axis over one adds rows
+        with ``Y = 0`` rather than inventing anything. Bounds that would cut off
+        observed events are refused instead.
 
     Returns
     -------
@@ -146,6 +166,14 @@ def build_spatiotemporal_grid(df: pd.DataFrame) -> pd.DataFrame:
 
     min_week = agg["week"].min()
     max_week = agg["week"].max()
+    if week_bounds is not None:
+        lo, hi = (pd.Timestamp(b) for b in week_bounds)
+        if lo > min_week or hi < max_week:
+            raise ValueError(
+                f"week_bounds ({lo.date()} .. {hi.date()}) would drop events outside them; "
+                f"the catalogue spans {min_week.date()} .. {max_week.date()}"
+            )
+        min_week, max_week = lo, hi
     week_tz = getattr(min_week, "tz", None)
     full_weeks = pd.date_range(
         start=min_week,
