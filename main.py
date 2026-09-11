@@ -138,6 +138,13 @@ def main() -> int:
         except Exception as exc:
             logger.warning("Walk-forward validation failed: %s", exc)
 
+        # ── Step 6b: Level bias of every forecast, and what survives it ──────
+        try:
+            from src.level_calibration import run_level_calibration
+            run_level_calibration()
+        except Exception as exc:
+            logger.warning("Level calibration failed: %s", exc)
+
         # ── Step 7: Probabilistic calibration (PIT) ───────────────────────────
         run_calibration()
 
