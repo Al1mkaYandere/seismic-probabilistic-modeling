@@ -214,6 +214,35 @@ def _dl_train_predict(
     return np.clip(preds, 1e-9, None)
 
 
+def fold_prediction_rows(
+    df_test: pd.DataFrame,
+    y_test: np.ndarray,
+    test_year: int,
+    predictions: dict[str, np.ndarray | None],
+    etas_fallback_cells: set[str],
+) -> pd.DataFrame:
+    """One row per (cell, week) of a fold, with every model's forecast side by side.
+
+    The aggregated table keeps one number per year and model, which is enough to
+    say who won and not enough to say why. It cannot answer the question the
+    completeness experiment raised: at the honest threshold ETAS cannot be fitted
+    in 4 of 17 cells and degenerates to a constant rate there, so part of its
+    loss may be missing data rather than a property of the model. Splitting the
+    comparison by cell needs the forecasts themselves.
+
+    ``etas_fallback_cells`` marks the cells where that degeneration happened, so
+    the split can be made without refitting anything.
+    """
+    rows = df_test[["cell_id", "week"]].copy()
+    rows.insert(0, "Year", test_year)
+    rows["y_true"] = np.asarray(y_test, dtype=np.float64)
+    for name, values in predictions.items():
+        rows[name] = (np.full(len(rows), np.nan) if values is None
+                      else np.asarray(values, dtype=np.float64))
+    rows["etas_fallback_cell"] = rows["cell_id"].isin(etas_fallback_cells)
+    return rows
+
+
 def run_walk_forward() -> pd.DataFrame:
     set_seeds(42)
 
@@ -257,6 +286,7 @@ def run_walk_forward() -> pd.DataFrame:
         raw_df = None
 
     results_list: list[dict] = []
+    prediction_frames: list[pd.DataFrame] = []
 
     for test_year in range(2018, 2024):
         train_mask = df["week"].dt.year < test_year
@@ -287,6 +317,7 @@ def run_walk_forward() -> pd.DataFrame:
 
         # --- 1. NB GLM with MLE alpha per fold ---
         mae_nb, rmse_nb, dev_nb, alpha_nb = np.nan, np.nan, np.nan, np.nan
+        preds_nb = None
         try:
             X_train_sm = sm.add_constant(X_train_scaled, has_constant="add")
             X_test_sm = sm.add_constant(X_test_scaled, has_constant="add")
@@ -308,6 +339,7 @@ def run_walk_forward() -> pd.DataFrame:
 
         # --- 2. Hybrid DL Enhanced (NB loss) ---
         mae_dl, rmse_dl, dev_dl = np.nan, np.nan, np.nan
+        preds_dl = None
         try:
             preds_dl = _dl_train_predict(
                 X_train_scaled, y_train, c_train_arr, df_train["week"].to_numpy(),
@@ -328,6 +360,7 @@ def run_walk_forward() -> pd.DataFrame:
 
         # --- 3. Neural Poisson Enhanced ---
         mae_np, rmse_np, dev_np = np.nan, np.nan, np.nan
+        preds_np = None
         try:
             preds_np = _dl_train_predict(
                 X_train_scaled, y_train, c_train_arr, df_train["week"].to_numpy(),
@@ -348,11 +381,16 @@ def run_walk_forward() -> pd.DataFrame:
 
         # --- 4. ETAS per-cell ---
         mae_etas, rmse_etas, dev_etas = np.nan, np.nan, np.nan
+        preds_etas = None
+        etas_fallback_cells: set[str] = set()
         if raw_df is not None:
             try:
                 from src.etas_baseline import fit_etas_per_cell, predict_etas
                 train_end = pd.Timestamp(f"{test_year}-01-01")
                 params = fit_etas_per_cell(raw_df, train_end)
+                etas_fallback_cells = {
+                    str(cell) for cell, p in params.items() if p.get("fallback")
+                }
                 weeks_grid = df_test[["cell_id", "week"]].copy()
                 pred_etas_df = predict_etas(params, weeks_grid, raw_df)
                 df_test_etas = df_test.merge(pred_etas_df, on=["cell_id", "week"], how="left")
@@ -371,6 +409,17 @@ def run_walk_forward() -> pd.DataFrame:
             "alpha_hat": np.nan,
         })
 
+        prediction_frames.append(fold_prediction_rows(
+            df_test, y_test, test_year,
+            {
+                "pred_nb_glm": preds_nb,
+                "pred_hybrid_dl": preds_dl,
+                "pred_neural_poisson": preds_np,
+                "pred_etas": preds_etas,
+            },
+            etas_fallback_cells,
+        ))
+
         logger.info(
             "Year %d | NB MPD=%.4f | DL MPD=%.4f | NP MPD=%.4f | ETAS MPD=%.4f",
             test_year, dev_nb, dev_dl, dev_np, dev_etas,
@@ -380,6 +429,13 @@ def run_walk_forward() -> pd.DataFrame:
     OUTPUT_WF_CSV.parent.mkdir(parents=True, exist_ok=True)
     results_df.to_csv(OUTPUT_WF_CSV, index=False)
     logger.info("Walk-forward results saved to %s", OUTPUT_WF_CSV)
+
+    if prediction_frames:
+        preds_out = pd.concat(prediction_frames, ignore_index=True)
+        preds_path = config.OUTPUT_DIR / "walk_forward_predictions.csv"
+        preds_out.to_csv(preds_path, index=False)
+        logger.info("Walk-forward per-row predictions saved to %s (%d rows)",
+                    preds_path, len(preds_out))
 
     _plot_walk_forward(results_df)
     return results_df
