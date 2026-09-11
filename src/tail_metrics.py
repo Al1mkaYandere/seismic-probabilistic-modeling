@@ -21,6 +21,7 @@ from scipy.stats import nbinom, poisson
 from sklearn.metrics import mean_absolute_error, mean_poisson_deviance, mean_squared_error
 
 from src import config
+from src import predictive_family
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +156,8 @@ def run_tail_metrics() -> pd.DataFrame:
                 continue
             y_c = sub["y_true"].to_numpy(dtype=np.float64)
             mu_c = sub["mu_pred"].to_numpy(dtype=np.float64)
-            alpha_c = sub["alpha_pred"].to_numpy(dtype=np.float64) if "alpha_pred" in sub.columns else None
-            dist_c = "nb" if "Hybrid" in str(model_name) else "poisson"
+            alpha_c = predictive_family.dispersion_of(sub, str(model_name))
+            dist_c = predictive_family.family_of(sub, str(model_name))
             masks_c = _strata_masks(y_c)
             for stratum, mask in masks_c.items():
                 if mask.sum() == 0:

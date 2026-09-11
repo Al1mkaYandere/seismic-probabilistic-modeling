@@ -14,7 +14,7 @@ import pandas as pd
 
 matplotlib.use("Agg")
 
-from src import dl_modeling, spatial_diagnostics
+from src import dl_modeling, predictive_family, spatial_diagnostics
 from src.dl_modeling import FEATURES_ENHANCED
 
 TEST_WEEKS = 160
@@ -54,27 +54,41 @@ def test_the_poisson_network_reports_no_dispersion_and_the_nb_one_does(
     )
 
 
+def _rows(family: str, alpha) -> pd.DataFrame:
+    return pd.DataFrame({
+        predictive_family.COLUMN: family,
+        "alpha_pred": alpha,
+    })
+
+
 def test_a_missing_dispersion_scores_residuals_as_poisson() -> None:
     y = np.array([0.0, 1.0, 3.0, 7.0])
     mu = np.array([0.2, 0.9, 2.0, 5.0])
+    nan_column = _rows(predictive_family.NB, np.full(4, np.nan))
+    declared_poisson = _rows(predictive_family.POISSON, np.full(4, 0.8))
+    declared_nb = _rows(predictive_family.NB, np.full(4, 0.8))
 
-    absent = spatial_diagnostics._residuals(y, mu, spatial_diagnostics._mean_dispersion(None))
-    all_nan = spatial_diagnostics._residuals(
-        y, mu, spatial_diagnostics._mean_dispersion(np.full(4, np.nan))
-    )
     poisson = spatial_diagnostics._residuals(y, mu, None)
+    all_nan = spatial_diagnostics._residuals(
+        y, mu, predictive_family.mean_dispersion_of(nan_column)
+    )
+    # The declaration decides, not the numbers: these rows carry a perfectly finite
+    # 0.8 and must still be scored as Poisson because that is what they declare.
+    by_declaration = spatial_diagnostics._residuals(
+        y, mu, predictive_family.mean_dispersion_of(declared_poisson)
+    )
     real = spatial_diagnostics._residuals(
-        y, mu, spatial_diagnostics._mean_dispersion(np.full(4, 0.8))
+        y, mu, predictive_family.mean_dispersion_of(declared_nb)
     )
 
-    np.testing.assert_array_equal(absent, poisson)
-    np.testing.assert_array_equal(all_nan, poisson), "a column of NaN became a dispersion"
+    np.testing.assert_array_equal(all_nan, poisson)
     assert np.isfinite(all_nan).all(), "NaN dispersion leaked into the residuals"
-    # A dispersion that is really there must still change the scaling, or the
+    np.testing.assert_array_equal(by_declaration, poisson)
+    # A dispersion that is really declared must still change the scaling, or the
     # fallback has swallowed the negative binomial case along with the missing one.
-    assert not np.allclose(real, poisson), "a real dispersion stopped affecting residuals"
+    assert not np.allclose(real, poisson), "a declared dispersion stopped mattering"
 
 
 def test_a_partly_missing_dispersion_averages_only_what_is_there() -> None:
-    mixed = np.array([1.0, np.nan, 3.0, np.nan])
-    assert spatial_diagnostics._mean_dispersion(mixed) == 2.0
+    mixed = _rows(predictive_family.NB, np.array([1.0, np.nan, 3.0, np.nan]))
+    assert predictive_family.mean_dispersion_of(mixed) == 2.0

@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset
 
 from src import config
+from src import predictive_family
 from src.splitting import temporal_validation_split
 
 logger = logging.getLogger(__name__)
@@ -472,6 +473,10 @@ def _train_one_variant(
         calib_df = pd.DataFrame(
             {
                 "model": model_name,
+                # Declared where it is known, rather than guessed four different
+                # ways downstream. loss_kind is what the model was actually fitted
+                # with, which is the only honest answer.
+                predictive_family.COLUMN: loss_kind,
                 "y_true": y_test.astype(np.float64),
                 "mu_pred": preds.astype(np.float64),
                 "alpha_pred": alpha_pred,

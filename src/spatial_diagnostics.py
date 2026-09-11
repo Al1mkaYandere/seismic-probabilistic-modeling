@@ -15,6 +15,7 @@ import pandas as pd
 import seaborn as sns
 
 from src import config
+from src import predictive_family
 
 logger = logging.getLogger(__name__)
 
@@ -60,23 +61,6 @@ def _morans_i(x: np.ndarray, W: np.ndarray) -> float:
     if abs(denominator) < 1e-12:
         return np.nan
     return numerator / denominator
-
-
-def _mean_dispersion(alpha: np.ndarray | None) -> float | None:
-    """Average dispersion over the rows that have one, or None when none do.
-
-    A model that never fitted a dispersion reports NaN rather than a number, so
-    the plain mean of the column is NaN. ``_residuals`` would fall back to the
-    Poisson variance on a NaN anyway, but only after the NaN had travelled
-    through everything else that reads this value. Saying None here keeps the
-    distinction between "no dispersion" and "a dispersion that happens to be
-    small" where it belongs.
-    """
-    if alpha is None:
-        return None
-    values = np.asarray(alpha, dtype=np.float64)
-    values = values[np.isfinite(values)]
-    return float(np.mean(values)) if values.size else None
 
 
 def _residuals(y: np.ndarray, mu: np.ndarray, alpha: float | None) -> np.ndarray:
@@ -127,8 +111,7 @@ def _weekly_moran(models_to_check: list[dict], comparison_df: pd.DataFrame,
             model_name = m["col"]
             y = m["y_true"]
             mu = m["mu_pred"]
-            alpha_arr = m.get("alpha_pred")
-            alpha_scalar = _mean_dispersion(alpha_arr)
+            alpha_scalar = m.get("dispersion")
             cell_ids_arr = m.get("cell_id")
             weeks_arr = m.get("week")
         else:
@@ -265,7 +248,12 @@ def run_spatial_diagnostics(out_dir: Path | None = None) -> pd.DataFrame:
                     "source": "calib", "col": str(model_name),
                     "y_true": sub["y_true"].to_numpy(dtype=np.float64),
                     "mu_pred": sub["mu_pred"].to_numpy(dtype=np.float64),
-                    "alpha_pred": sub["alpha_pred"].to_numpy(dtype=np.float64) if "alpha_pred" in sub.columns else None,
+                    # The declared dispersion, not whatever numbers happen to be
+                    # in the column: the Poisson network reports a dispersion head
+                    # that never received a gradient, and this module used to score
+                    # its residuals against a negative binomial variance built from
+                    # that.
+                    "dispersion": predictive_family.mean_dispersion_of(sub, str(model_name)),
                     "cell_id": sub["cell_id"].to_numpy(dtype=str) if "cell_id" in sub.columns else None,
                     "week": sub["week"].to_numpy() if "week" in sub.columns else None,
                 })
@@ -288,8 +276,7 @@ def run_spatial_diagnostics(out_dir: Path | None = None) -> pd.DataFrame:
                 model_name = m["col"]
                 y = m["y_true"]
                 mu = m["mu_pred"]
-                alpha_arr = m.get("alpha_pred")
-                alpha_scalar = _mean_dispersion(alpha_arr)
+                alpha_scalar = m.get("dispersion")
                 cell_ids_arr = m.get("cell_id")
                 cell_r = _get_cell_residuals(y, mu, alpha_scalar, cell_ids_arr)
             else:

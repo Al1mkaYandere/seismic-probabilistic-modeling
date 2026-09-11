@@ -198,8 +198,10 @@ def test_the_dispersion_comes_from_the_training_split_and_not_the_scored_one(
     monkeypatch.setattr(config, "MODEL_COMPARISON_CSV", comparison_path)
 
     calib = pd.concat([
-        keys.assign(model=name, mu_pred=test["lambda_pred"].to_numpy(), alpha_pred=1.0)
-        for name in ("Neural_Poisson_Enhanced", "Hybrid_DL_Enhanced")
+        keys.assign(model=name, family=family,
+                    mu_pred=test["lambda_pred"].to_numpy(), alpha_pred=1.0)
+        for name, family in (("Neural_Poisson_Enhanced", "poisson"),
+                             ("Hybrid_DL_Enhanced", "nb"))
     ], ignore_index=True)
     calib_path = tmp_path / "calibration_predictions.csv"
     calib.to_csv(calib_path, index=False)
@@ -258,8 +260,10 @@ def test_every_scored_model_is_also_compared_against_something(tmp_path, monkeyp
     monkeypatch.setattr(config, "MODEL_COMPARISON_CSV", comparison_path)
 
     calib = pd.concat([
-        keys.assign(model=name, mu_pred=test["lambda_pred"].to_numpy(), alpha_pred=1.0)
-        for name in ("Neural_Poisson_Enhanced", "Hybrid_DL_Enhanced")
+        keys.assign(model=name, family=family,
+                    mu_pred=test["lambda_pred"].to_numpy(), alpha_pred=1.0)
+        for name, family in (("Neural_Poisson_Enhanced", "poisson"),
+                             ("Hybrid_DL_Enhanced", "nb"))
     ], ignore_index=True)
     calib_path = tmp_path / "calibration_predictions.csv"
     calib.to_csv(calib_path, index=False)

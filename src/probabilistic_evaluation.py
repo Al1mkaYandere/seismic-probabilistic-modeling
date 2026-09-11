@@ -61,6 +61,7 @@ from scipy.special import gammaln
 from scipy.stats import nbinom, norm, poisson
 
 from src import config
+from src import predictive_family
 
 logger = logging.getLogger(__name__)
 
@@ -225,12 +226,17 @@ def collect_predictive_distributions() -> tuple[pd.DataFrame, list[PredictiveDis
     calib = pd.read_csv(config.CALIBRATION_PREDICTIONS_CSV)
     hybrid_mu: np.ndarray | None = None
     for name in ("Neural_Poisson_Enhanced", "Hybrid_DL_Enhanced"):
-        sub = calib.loc[calib["model"] == name, ["cell_id", "week", "mu_pred", "alpha_pred"]]
+        rows = calib.loc[calib["model"] == name]
+        sub = rows[["cell_id", "week", "mu_pred", "alpha_pred"]]
         joined = keys.merge(sub, on=["cell_id", "week"], how="left")
+        # Coverage first: rows that are missing altogether must be reported as
+        # missing, not as a model that declares no family.
         if joined["mu_pred"].isna().any():
             raise ValueError(f"{name} predictions do not cover every test row")
+        # The family the model declares, not one inferred from its name.
+        family = predictive_family.family_of(rows, name)
         mu = joined["mu_pred"].to_numpy(float)
-        if name == "Hybrid_DL_Enhanced":
+        if family == predictive_family.NB:
             hybrid_mu = mu
             dists.append(PredictiveDistribution(name, "nb", mu,
                                                 joined["alpha_pred"].to_numpy(float)))

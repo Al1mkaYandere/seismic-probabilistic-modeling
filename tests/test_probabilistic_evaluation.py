@@ -201,9 +201,12 @@ def _write_tiny_pipeline_outputs(tmp_path, shuffle_seed: int | None):
     etas["lambda_pred"] = 0.20 + 0.04 * np.arange(n)
 
     calib = []
-    for name, off in (("Neural_Poisson_Enhanced", 0.3), ("Hybrid_DL_Enhanced", 0.4)):
+    for name, off, family in (("Neural_Poisson_Enhanced", 0.3, "poisson"),
+                              ("Hybrid_DL_Enhanced", 0.4, "nb")):
         sub = base[["cell_id", "week", "y_true"]].copy()
         sub["model"] = name
+        # Declared, as the real file declares it: the reader refuses to guess.
+        sub["family"] = family
         sub["mu_pred"] = off + 0.05 * np.arange(n)
         sub["alpha_pred"] = 1.0 + 0.1 * np.arange(n)
         calib.append(sub)

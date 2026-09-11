@@ -11,6 +11,7 @@ import pandas as pd
 from scipy.stats import nbinom, poisson
 
 from src import config
+from src import predictive_family
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def run_calibration() -> pd.DataFrame:
         return pd.DataFrame(columns=["model", "n", "pit_mean", "pit_var", "pit_l1_uniform"])
 
     df = pd.read_csv(CALIBRATION_PREDS)
-    required = {"model", "y_true", "mu_pred", "alpha_pred"}
+    required = {"model", "y_true", "mu_pred", "alpha_pred", predictive_family.COLUMN}
     if not required.issubset(df.columns):
         logger.warning("Calibration skipped: missing required columns in %s", CALIBRATION_PREDS)
         return pd.DataFrame(columns=["model", "n", "pit_mean", "pit_var", "pit_l1_uniform"])
@@ -74,8 +75,8 @@ def run_calibration() -> pd.DataFrame:
     for model_name, sub in df.groupby("model", sort=True):
         y = sub["y_true"].to_numpy(dtype=np.int64)
         mu = sub["mu_pred"].to_numpy(dtype=np.float64)
-        alpha = sub["alpha_pred"].to_numpy(dtype=np.float64)
-        if model_name.startswith("Hybrid_DL"):
+        alpha = predictive_family.dispersion_of(sub, str(model_name))
+        if alpha is not None:
             pit = _compute_nb_pit(y=y, mu=mu, alpha=alpha)
         else:
             pit = _compute_poisson_pit(y=y, mu=mu)
