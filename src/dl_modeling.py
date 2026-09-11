@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset
 
 from src import config
+from src.splitting import temporal_validation_split
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,14 @@ DL_VARIANTS: tuple[tuple[list[str], str, str], ...] = (
 A module constant rather than a literal inside ``run_dl_modeling`` so that a test
 can reorder the queue: "the result does not depend on the position" is the
 property being guarded, and it cannot be checked from outside otherwise.
+"""
+
+STATIC_VAL_FRACTION: float = 0.1
+"""Share of the training period's weeks held out for early stopping.
+
+Deliberately not the same constant as the year-by-year protocol's 0.15:
+the two protocols differ here as they differ in six other ways, and naming
+that rather than quietly unifying it keeps the difference visible.
 """
 
 BATCH_SIZE = 64
@@ -257,9 +266,21 @@ def _train_one_variant(
     test_df = work[work["week"].isin(test_weeks)].reset_index(drop=True).copy()
     if train_full.empty or test_df.empty:
         raise ValueError("Chronological week split produced empty train/test")
-    n_val = max(1, int(np.floor(0.1 * len(train_full))))
-    train_df = train_full.iloc[:-n_val].reset_index(drop=True).copy()
-    val_df = train_full.iloc[-n_val:].reset_index(drop=True).copy()
+    # The validation block is the last tenth of the training period's WEEKS, not of
+    # its rows. The panel holds 17 cells per week, so a row-position cut lands
+    # inside a week: it put 9 cells of 2020-02-17 into training and the other 8
+    # into validation, and early stopping was then judged partly on a week the
+    # model had already been trained on. Same defect the year-by-year protocol
+    # fixed in a540fd8, and the rule is now shared instead of written twice.
+    #
+    # The fraction stays 0.1 rather than splitting.VAL_FRACTION (0.15): how much to
+    # hold out is a different decision from where the cut falls, and moving both at
+    # once would leave the resulting shift in the numbers unattributable.
+    train_idx, val_idx = temporal_validation_split(
+        train_full["week"].to_numpy(), val_fraction=STATIC_VAL_FRACTION
+    )
+    train_df = train_full.iloc[train_idx].reset_index(drop=True).copy()
+    val_df = train_full.iloc[val_idx].reset_index(drop=True).copy()
 
     X_train = train_df[features].fillna(0.0).astype(float)
     X_val = val_df[features].fillna(0.0).astype(float)

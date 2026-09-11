@@ -90,42 +90,11 @@ def _fit_nb_mle_glm(y: np.ndarray, X_sm: np.ndarray) -> tuple:
     return best_res, best_llf, best_alpha
 
 
-VAL_FRACTION: float = 0.15
+# The split rule lives in src/splitting.py: the static protocol needs the same
+# one, and this module cannot be imported from there without a cycle.
+from src.splitting import VAL_FRACTION, temporal_validation_split  # noqa: E402
 
-
-def temporal_validation_split(
-    weeks_train: np.ndarray,
-    val_fraction: float = VAL_FRACTION,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Split training rows into (train, validation) indices along the time axis.
-
-    The validation block is the last ``val_fraction`` of the training period's
-    UNIQUE WEEKS, not of its rows. The panel on disk is sorted by
-    ``["cell_id", "week"]`` (see grid_builder.py), so a row-position cut carves
-    out whole cells instead of the tail of the time axis: for the 2023 fold that
-    put 3 of 17 cells into validation, two of them absent from training
-    altogether, and left their embeddings untrained.
-
-    Kept as a separate function so the property can be tested directly against
-    the real panel instead of being re-implemented in a test.
-
-    Parameters
-    ----------
-    weeks_train : np.ndarray
-        Week of each training row, in the row order the caller will use.
-    val_fraction : float
-        Share of unique weeks to hold out, from the end of the period.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        Positional indices into ``weeks_train``: training rows, validation rows.
-    """
-    unique_weeks = np.unique(weeks_train)
-    n_val_weeks = max(1, int(np.floor(val_fraction * len(unique_weeks))))
-    val_weeks = unique_weeks[-n_val_weeks:]
-    val_mask = np.isin(weeks_train, val_weeks)
-    return np.where(~val_mask)[0], np.where(val_mask)[0]
+__all__ = ["VAL_FRACTION", "temporal_validation_split"]
 
 
 def _dl_train_predict(
