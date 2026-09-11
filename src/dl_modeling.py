@@ -55,8 +55,71 @@ AUDITED_MODEL: str = "Hybrid_DL_Enhanced"
 """The model whose dispersion the alpha audit describes.
 
 Named once: the audit is about the network the paper reports, and the
-five-seed sweep trains a model of the same name five more times.
+five-seed sweep trains a model of the same name five more times. It cannot be
+derived - which model the paper reports is a choice, not a property of the list -
+so the agreement is checked instead, loudly, at import.
 """
+
+
+
+def model_names(variants: tuple | None = None) -> tuple[str, ...]:
+    """Every model the static protocol trains, in the order it trains them."""
+    return tuple(name for _features, name, _loss in (variants or DL_VARIANTS))
+
+
+def calibrated_models(variants: tuple | None = None) -> frozenset[str]:
+    """Models whose per-row predictions are kept for the downstream scoring.
+
+    The rule is "the enhanced variants", read off the declaration. It used to be a
+    second hand-written list of the same names, which is how a rename silently stops
+    producing calibration_predictions.csv: no error, the file simply lacks a model.
+
+    Derived when called rather than at import, so that the rule can be checked
+    against a changed declaration instead of only against itself.
+    """
+    return frozenset(
+        name for features, name, _loss in (variants or DL_VARIANTS)
+        if features is FEATURES_ENHANCED
+    )
+
+
+def variant_for(name: str, variants: tuple | None = None) -> tuple:
+    """The declaration entry for one model, or a readable error.
+
+    Written out rather than left to ``next(...)``: a bare generator raises
+    StopIteration with no message, and the caller that needed this wraps every seed
+    in ``except Exception``, so a rename turned into five log lines saying a seed
+    failed and not why.
+    """
+    for entry in (variants or DL_VARIANTS):
+        if entry[1] == name:
+            return entry
+    raise ValueError(
+        f"no model named {name!r} is declared; the protocol trains "
+        f"{', '.join(model_names(variants))}"
+    )
+
+
+def check_audited_model(audited: str | None = None, variants: tuple | None = None) -> None:
+    """Fail loudly if the audited model is not one the protocol actually trains.
+
+    Which model the paper reports is a choice, not a property of the list, so it
+    cannot be derived - but disagreement can be caught instead of losing the alpha
+    audit without a word.
+    """
+    audited = AUDITED_MODEL if audited is None else audited
+    names = model_names(variants)
+    if audited not in names:
+        raise ValueError(
+            f"the audited model {audited!r} is not among the models actually trained "
+            f"({', '.join(names)}); a rename in DL_VARIANTS left it behind"
+        )
+    if audited not in calibrated_models(variants):
+        raise ValueError(
+            f"the audited model {audited!r} keeps no per-row predictions, so there is "
+            "nothing to audit its dispersion from"
+        )
+
 
 STATIC_VAL_FRACTION: float = 0.1
 """Share of the training period's weeks held out for early stopping.
@@ -388,7 +451,7 @@ def _train_one_variant(
     logger.debug("%s | MAE: %.6f | RMSE: %.6f | Mean Poisson Deviance: %.6f", model_name, mae, rmse, mpd)
 
     calib_df: pd.DataFrame | None = None
-    if model_name in {"Hybrid_DL_Enhanced", "Neural_Poisson_Enhanced"}:
+    if model_name in calibrated_models():
         alpha_pred = (
             np.concatenate(alpha_parts).astype(np.float64)
             if alpha_parts
@@ -430,7 +493,7 @@ def _train_one_variant(
 
 
 def run_alpha_identifiability(seeds: list[int] | None = None) -> pd.DataFrame:
-    """Train Hybrid_DL_Enhanced with multiple seeds and report per-seed alpha statistics.
+    """Train the audited model with multiple seeds and report per-seed alpha statistics.
 
     Returns
     -------
@@ -441,6 +504,11 @@ def run_alpha_identifiability(seeds: list[int] | None = None) -> pd.DataFrame:
     if seeds is None:
         seeds = [42, 7, 123, 2024, 999]
 
+    # Before the loop, not inside it: every seed is wrapped in "except Exception" to
+    # keep one bad fit from killing the sweep, and a name that does not exist would
+    # otherwise be reported five times as a failed seed with no reason given.
+    check_audited_model()
+
     df = _load_df()
     summary_rows: list[dict] = []
     per_cell_alphas: dict[int, dict] = {}
@@ -448,7 +516,8 @@ def run_alpha_identifiability(seeds: list[int] | None = None) -> pd.DataFrame:
     for seed in seeds:
         _set_seed(seed)
         try:
-            _, calib_df = _train_one_variant(df, FEATURES_ENHANCED, "Hybrid_DL_Enhanced", loss_kind="nb")
+            features, name, loss_kind = variant_for(AUDITED_MODEL)
+            _, calib_df = _train_one_variant(df, features, name, loss_kind=loss_kind)
         except Exception as exc:
             logger.warning("Alpha identifiability: seed %d failed: %s", seed, exc)
             continue
@@ -511,6 +580,7 @@ def run_dl_modeling(seed: int = SEED) -> pd.DataFrame:
     pd.DataFrame
         Four rows: NB (baseline/enhanced) and Neural Poisson (baseline/enhanced).
     """
+    check_audited_model()
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     df = _load_df()
@@ -569,16 +639,10 @@ def run_dl_modeling(seed: int = SEED) -> pd.DataFrame:
     if OUTPUT_COMPARISON.exists():
         prev = pd.read_csv(OUTPUT_COMPARISON)
         if "model" in prev.columns:
-            prev = prev.loc[
-                ~prev["model"].isin(
-                    [
-                        "Hybrid_DL_Baseline",
-                        "Hybrid_DL_Enhanced",
-                        "Neural_Poisson_Baseline",
-                        "Neural_Poisson_Enhanced",
-                    ]
-                )
-            ].copy()
+            # The rows this run is about to replace, taken from the declaration:
+            # a hand-written copy of the list goes stale on a rename and leaves a
+            # duplicate row in the comparison table.
+            prev = prev.loc[~prev["model"].isin(model_names())].copy()
         out_all = pd.concat([prev, out], ignore_index=True)
     else:
         out_all = out.copy()
