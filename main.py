@@ -176,6 +176,27 @@ def main() -> int:
         except Exception as exc:
             logger.warning("Probabilistic evaluation failed: %s", exc)
 
+        # ── Step 12: ETAS within-week branching simulation ────────────────────
+        # Last on purpose: it only reads raw_for_etas/processed (both already
+        # built for step 5) and writes one new file, so it cannot shift
+        # anything computed by an earlier step.
+        try:
+            from src.etas_simulation import run_etas_simulation
+            run_etas_simulation(raw_for_etas, processed)
+        except Exception as exc:
+            logger.warning("ETAS branching simulation failed: %s", exc)
+
+        # ── Step 13: Tail hypothesis test and comparison power ───────────────
+        # Last on purpose, after the branching simulation: it only reads files
+        # every earlier step already wrote (the whole-sample probabilistic
+        # evaluation and the simulation's own predictions) and adds two new
+        # small tables, so it cannot move a number computed anywhere else.
+        try:
+            from src.tail_test import run_tail_test
+            run_tail_test()
+        except Exception as exc:
+            logger.warning("Tail hypothesis test failed: %s", exc)
+
         n_cells = processed["cell_id"].nunique()
         t_min = processed["week"].min()
         t_max = processed["week"].max()
