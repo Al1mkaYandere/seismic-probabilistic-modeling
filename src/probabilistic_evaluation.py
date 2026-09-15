@@ -66,7 +66,7 @@ from src import predictive_family
 logger = logging.getLogger(__name__)
 
 THRESHOLDS: tuple[int, ...] = (1, 2, 3, 5)
-N_BOOTSTRAP: int = 2000
+N_BOOTSTRAP: int = 100_000
 BOOTSTRAP_SEED: int = 42
 CRPS_TAIL_PAD: int = 40
 
@@ -294,6 +294,22 @@ def block_bootstrap_ci(values: np.ndarray, weeks: np.ndarray,
     The block length follows the same rule as the Newey-West lag used by the
     Diebold-Mariano test, so the two ways of handling serial dependence in this
     module agree on how far it reaches: 5 weeks at T = 144.
+
+    Vectorized rather than looped over resamples. A resample's mean only needs,
+    per week, how many rows it has and what they sum to - not the rows
+    themselves - so those two per-week numbers are precomputed once and turned
+    into prefix sums; a block's contribution is then a slice of the prefix, and
+    a resample's mean is a sum of block contributions divided by a sum of block
+    row counts. The block starts for all ``n_boot`` resamples are drawn in one
+    ``rng.integers(..., size=(n_boot, n_blocks))`` call rather than ``n_boot``
+    calls of shape ``(n_blocks,)``; both consume the generator's stream in the
+    same order and produce bit-identical block starts for the same seed, so the
+    resamples drawn are the same as a loop over resamples would draw. What is
+    NOT bit-identical is the arithmetic that turns a resample into a mean:
+    summing per-week aggregates first, rather than summing every row in block
+    order, reorders floating-point additions and can differ in the last 1-2
+    bits of a double (about 1e-15 relative). That is floating-point noise, not
+    a different answer - far below the precision anything here is reported at.
     """
     unique, blocks = _week_blocks(weeks)
     n_weeks = len(unique)
@@ -303,16 +319,18 @@ def block_bootstrap_ci(values: np.ndarray, weeks: np.ndarray,
 
     n_starts = n_weeks - block_weeks + 1
     n_blocks = int(np.ceil(n_weeks / block_weeks))
+
+    week_sum = np.array([values[idx].sum() for idx in blocks], dtype=np.float64)
+    week_count = np.array([idx.size for idx in blocks], dtype=np.float64)
+    prefix_sum = np.concatenate(([0.0], np.cumsum(week_sum)))
+    prefix_count = np.concatenate(([0.0], np.cumsum(week_count)))
+
     rng = np.random.default_rng(seed)
-    means = np.empty(n_boot, dtype=np.float64)
-    for b in range(n_boot):
-        starts = rng.integers(0, n_starts, size=n_blocks)
-        picked = np.concatenate([
-            blocks[start + offset]
-            for start in starts
-            for offset in range(block_weeks)
-        ])
-        means[b] = values[picked].mean()
+    starts = rng.integers(0, n_starts, size=(n_boot, n_blocks))
+    block_sum = prefix_sum[starts + block_weeks] - prefix_sum[starts]
+    block_count = prefix_count[starts + block_weeks] - prefix_count[starts]
+    means = block_sum.sum(axis=1) / block_count.sum(axis=1)
+
     lo, hi = np.percentile(means, [2.5, 97.5])
     return float(lo), float(hi)
 

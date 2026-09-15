@@ -152,6 +152,86 @@ def test_default_block_length_follows_the_newey_west_rule():
     assert default == explicit, "the default block length is not 5 weeks at T = 144"
 
 
+def _reference_block_bootstrap_ci(values, weeks, n_boot, seed, block_weeks=None):
+    """The straightforward algorithm: one Python loop over resamples.
+
+    block_bootstrap_ci avoids looping in Python over n_boot resamples, so that
+    N_BOOTSTRAP = 100,000 stays fast. This is the loop it replaced, kept only
+    here so a regression in the vectorized version cannot hide behind a change
+    to the production code it is checked against.
+    """
+    unique, blocks = pe._week_blocks(weeks)
+    n_weeks = len(unique)
+    if block_weeks is None:
+        block_weeks = min(pe.newey_west_lag(n_weeks) + 1, n_weeks)
+    block_weeks = max(1, min(block_weeks, n_weeks))
+    n_starts = n_weeks - block_weeks + 1
+    n_blocks = int(np.ceil(n_weeks / block_weeks))
+    rng = np.random.default_rng(seed)
+    means = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        starts = rng.integers(0, n_starts, size=n_blocks)
+        picked = np.concatenate([
+            blocks[start + offset]
+            for start in starts
+            for offset in range(block_weeks)
+        ])
+        means[b] = values[picked].mean()
+    lo, hi = np.percentile(means, [2.5, 97.5])
+    return float(lo), float(hi)
+
+
+def test_vectorized_bootstrap_matches_reference_loop_with_uneven_week_sizes():
+    """Removing the Python loop must not change the interval beyond rounding.
+
+    Weeks here carry different numbers of rows on purpose. A fixed 17-per-week
+    panel would never exercise the per-week row count that the vectorized
+    version has to track explicitly - the old loop got it for free by indexing
+    whatever rows happened to belong to a week.
+    """
+    rng = np.random.default_rng(11)
+    n_weeks = 60
+    week_ids = np.array([f"w{t:03d}" for t in range(n_weeks)])
+    rows_per_week = rng.integers(1, 20, size=n_weeks)
+    weeks = np.concatenate([np.repeat(w, c) for w, c in zip(week_ids, rows_per_week)])
+    per_week_level = rng.normal(size=n_weeks) * 3.0
+    values = rng.normal(size=len(weeks)) + np.repeat(per_week_level, rows_per_week)
+
+    got = pe.block_bootstrap_ci(values, weeks, n_boot=2000, seed=42)
+    expected = _reference_block_bootstrap_ci(values, weeks, n_boot=2000, seed=42)
+
+    assert got == pytest.approx(expected, abs=1e-12)
+
+
+def test_vectorized_bootstrap_keeps_weeks_whole_and_the_newey_west_block_length():
+    """The rewrite must not have quietly split a week or changed the block rule.
+
+    Rows within a week carry different values (uneven counts per week again),
+    so if the vectorized version resampled rows instead of weeks, reordering
+    rows inside a week would change which ones land in a truncated block and
+    move the interval. It must not: the week's sum and count are all that can
+    matter. The default block length must also still be the Newey-West rule
+    (5 weeks at T = 144), not silently reset by the rewrite.
+    """
+    rng = np.random.default_rng(23)
+    n_weeks = 144
+    week_ids = np.array([f"w{t:03d}" for t in range(n_weeks)])
+    rows_per_week = rng.integers(1, 10, size=n_weeks)
+    weeks = np.concatenate([np.repeat(w, c) for w, c in zip(week_ids, rows_per_week)])
+    values = rng.normal(size=len(weeks))
+
+    order = np.concatenate([
+        rng.permutation(np.flatnonzero(weeks == w)) for w in week_ids
+    ])
+    lo_a, hi_a = pe.block_bootstrap_ci(values, weeks, n_boot=1000, seed=5)
+    lo_b, hi_b = pe.block_bootstrap_ci(values[order], weeks[order], n_boot=1000, seed=5)
+    assert (lo_a, hi_a) == pytest.approx((lo_b, hi_b), abs=1e-12)
+
+    explicit = pe.block_bootstrap_ci(values, weeks, n_boot=500, seed=9, block_weeks=5)
+    default = pe.block_bootstrap_ci(values, weeks, n_boot=500, seed=9)
+    assert default == explicit
+
+
 def test_diebold_mariano_finds_nothing_between_identical_models():
     rng = np.random.default_rng(3)
     weeks = np.repeat([f"w{i}" for i in range(60)], 5)
