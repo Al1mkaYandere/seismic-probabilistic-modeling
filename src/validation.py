@@ -1,4 +1,5 @@
-"""Walk-Forward Validation: NB GLM (MLE alpha), Hybrid DL NB, Neural Poisson, ETAS per-cell.
+"""Walk-Forward Validation: NB GLM (MLE alpha), NB GLM with a per-cell intercept
+(MLE alpha), Hybrid DL NB, Neural Poisson, ETAS per-cell.
 
 Walk-Forward protocol:
 - For each test year Y in 2018–2023, train on all years < Y, test on year Y.
@@ -89,6 +90,33 @@ def _fit_nb_mle_glm(y: np.ndarray, X_sm: np.ndarray) -> tuple:
         except Exception:
             continue
     return best_res, best_llf, best_alpha
+
+
+def _cell_dummy_columns(
+    train_cells: pd.Series, other_cells: pd.Series
+) -> tuple[np.ndarray, np.ndarray]:
+    """One-hot indicator per cell, built from the training fold, one cell left out
+    as the reference level.
+
+    This is the control NB_Enhanced_MLE_Cell exists for: a plain feature-only NB
+    GLM cannot represent that two cells have different average rates, so if the
+    neural net's edge over it is really just the net's cell embedding standing in
+    for different cell levels, giving the linear model its own per-cell intercept
+    should close that gap. Encoding from the training fold only (mirrors
+    dl_modeling.py::_encode_cells) means a cell absent from training - never
+    happens here after the first test year, since every earlier year is in the
+    training fold - falls back to all-zero, i.e. the reference level, rather than
+    raising: there is nothing to estimate its own level from.
+    """
+    levels = sorted(train_cells.astype(str).unique())[1:]
+
+    def _dummies(cells: pd.Series) -> np.ndarray:
+        cells = cells.astype(str)
+        if not levels:
+            return np.zeros((len(cells), 0))
+        return np.column_stack([(cells == level).to_numpy(dtype=np.float64) for level in levels])
+
+    return _dummies(train_cells), _dummies(other_cells)
 
 
 # The split rule lives in src/splitting.py: the static protocol needs the same
@@ -324,6 +352,37 @@ def run_walk_forward(seed: int = SEED) -> pd.DataFrame:
             "alpha_hat": alpha_nb,
         })
 
+        # --- 1b. Same NB GLM, plus a fixed effect per cell ---
+        mae_nbc, rmse_nbc, dev_nbc, alpha_nbc = np.nan, np.nan, np.nan, np.nan
+        preds_nbc = None
+        try:
+            cell_dummies_train, cell_dummies_test = _cell_dummy_columns(
+                df_train["cell_id"], df_test["cell_id"]
+            )
+            X_train_sm_cell = sm.add_constant(
+                np.hstack([X_train_scaled, cell_dummies_train]), has_constant="add"
+            )
+            X_test_sm_cell = sm.add_constant(
+                np.hstack([X_test_scaled, cell_dummies_test]), has_constant="add"
+            )
+            nb_cell_result, _, alpha_nbc = _fit_nb_mle_glm(y_train, X_train_sm_cell)
+            if nb_cell_result is None:
+                raise RuntimeError("NB MLE grid failed")
+            preds_nbc = np.clip(
+                np.asarray(nb_cell_result.predict(X_test_sm_cell), dtype=np.float64), 1e-9, None
+            )
+            mae_nbc = float(mean_absolute_error(y_test, preds_nbc))
+            rmse_nbc = float(np.sqrt(mean_squared_error(y_test, preds_nbc)))
+            dev_nbc = mean_poisson_deviance_safe(y_test, preds_nbc)
+        except Exception as exc:
+            logger.warning("NB GLM with cell effect failed for %d: %s", test_year, exc)
+
+        results_list.append({
+            "Year": test_year, "Model": "NB_Enhanced_MLE_Cell",
+            "MAE": mae_nbc, "RMSE": rmse_nbc, "Mean_Poisson_Deviance": dev_nbc,
+            "alpha_hat": alpha_nbc,
+        })
+
         # --- 2. Hybrid DL Enhanced (NB loss) ---
         mae_dl, rmse_dl, dev_dl = np.nan, np.nan, np.nan
         preds_dl = None
@@ -400,6 +459,7 @@ def run_walk_forward(seed: int = SEED) -> pd.DataFrame:
             df_test, y_test, test_year,
             {
                 "pred_nb_glm": preds_nb,
+                "pred_nb_glm_cell": preds_nbc,
                 "pred_hybrid_dl": preds_dl,
                 "pred_neural_poisson": preds_np,
                 "pred_etas": preds_etas,
@@ -442,7 +502,12 @@ def _plot_walk_forward(results_df: pd.DataFrame) -> None:
         "Neural Poisson": "#2980b9",
         "ETAS per-cell": "#e67e22",
     }
-    plot_df = results_df.copy()
+    # NB_Enhanced_MLE_Cell answers a different question (does a linear model
+    # with its own per-cell intercept close the neural net's gap?) and is
+    # compared against the neural net in level_calibration.csv, not in this
+    # figure - it is left out here rather than added as a 5th, undifferentiated
+    # bar with no palette entry of its own.
+    plot_df = results_df[results_df["Model"].isin(model_map)].copy()
     plot_df["Model_Display"] = plot_df["Model"].map(model_map).fillna(plot_df["Model"])
     plot_df = plot_df.dropna(subset=["Mean_Poisson_Deviance"])
 

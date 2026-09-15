@@ -23,6 +23,7 @@ WF_PREDICTIONS = REPO_ROOT / "outputs" / "walk_forward_predictions.csv"
 
 MODEL_COLUMN = {
     "NB_Enhanced_MLE": "pred_nb_glm",
+    "NB_Enhanced_MLE_Cell": "pred_nb_glm_cell",
     "Hybrid_DL_Enhanced": "pred_hybrid_dl",
     "Neural_Poisson_Enhanced": "pred_neural_poisson",
     "ETAS_Per_Cell": "pred_etas",
