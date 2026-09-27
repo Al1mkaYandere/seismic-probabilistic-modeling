@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +30,46 @@ from src.mc_estimation import run_mc_estimation
 logger = logging.getLogger(__name__)
 
 
+def _switch(name: str) -> bool:
+    """True when the environment variable ``name`` is set to "1".
+
+    The switches below let the runs reported in the paper be repeated from this
+    file alone. Unset, the pipeline behaves as it always has: it downloads the
+    catalogue, derives the weekly axis from the events it keeps, writes the
+    panel and trains with the default seed.
+    """
+    return os.environ.get(name) == "1"
+
+
+def _ingest_unless_offline() -> None:
+    """Download the USGS catalogue, unless SPM_OFFLINE=1 says to use the committed one."""
+    if _switch("SPM_OFFLINE"):
+        logger.info("SPM_OFFLINE=1: using the committed catalogue, nothing is downloaded")
+        return
+    run_ingestion_pipeline()
+
+
+def _week_bounds() -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """The weekly axis of the M >= 3.0 catalogue when SPM_PIN_AXIS=1, else None.
+
+    Above 3.0 the last week of the period can hold no event; the axis would then
+    lose it and the 80/20 split would move by a week. Pinning keeps runs at
+    different thresholds on the same weeks.
+    """
+    if not _switch("SPM_PIN_AXIS"):
+        return None
+    raw_30 = filter_to_completeness(load_raw_data(), m_c=3.0)
+    times = pd.to_datetime(raw_30["time"], utc=True, format="mixed").dt.tz_localize(None)
+    weeks = times.dt.to_period("W").dt.start_time
+    return weeks.min(), weeks.max()
+
+
+def _training_seed() -> int | None:
+    """Seed for both training protocols from SPM_SEED; None keeps their default (42)."""
+    value = os.environ.get("SPM_SEED", "")
+    return int(value) if value.strip() else None
+
+
 def main() -> int:
     """Run the full pipeline end-to-end.
 
@@ -53,13 +94,17 @@ def main() -> int:
 
     try:
         # ── Step 1: Ingestion + Grid ──────────────────────────────────────────
-        run_ingestion_pipeline()
+        _ingest_unless_offline()
         # One completeness cut for the whole run: the panel and the ETAS fit must
         # see the same events, or the baseline is scored against a target built
         # from a different catalogue than the one it was fitted on.
         raw = filter_to_completeness(load_raw_data())
-        processed = build_spatiotemporal_grid(raw)
-        save_processed_data(processed)
+        processed = build_spatiotemporal_grid(raw, week_bounds=_week_bounds())
+        if _switch("SPM_KEEP_PANEL"):
+            logger.info("SPM_KEEP_PANEL=1: the panel on disk is left as it is")
+        else:
+            save_processed_data(processed)
+        seed = _training_seed()
 
         # ── Step 1b: Magnitude of completeness ───────────────────────────────
         try:
@@ -77,7 +122,7 @@ def main() -> int:
         # ── Step 4: DL modeling (NB + Neural Poisson) ────────────────────────
         try:
             from src.dl_modeling import run_dl_modeling
-            dl_results = run_dl_modeling()
+            dl_results = run_dl_modeling() if seed is None else run_dl_modeling(seed=seed)
             all_results.append(dl_results)
         except ModuleNotFoundError as exc:
             logger.warning("DL step skipped (missing dependency): %s", exc)
@@ -134,7 +179,7 @@ def main() -> int:
         # ── Step 6: Walk-forward validation ──────────────────────────────────
         try:
             from src.validation import run_walk_forward
-            run_walk_forward()
+            run_walk_forward() if seed is None else run_walk_forward(seed=seed)
         except Exception as exc:
             logger.warning("Walk-forward validation failed: %s", exc)
 

@@ -7,7 +7,6 @@ import logging
 from typing import Any
 
 import pandas as pd
-import requests
 
 from src import config
 
@@ -59,6 +58,10 @@ def fetch_earthquake_data() -> pd.DataFrame:
     requests.RequestException
         On network errors or non-success HTTP status after ``raise_for_status``.
     """
+    # Imported here rather than at the top: only a download needs the network
+    # library, and an offline run (SPM_OFFLINE=1 in main.py) must work without it.
+    import requests
+
     params = _build_request_params()
     logger.info("Request URL: %s", config.BASE_URL)
     logger.info("Request parameters: %s", params)

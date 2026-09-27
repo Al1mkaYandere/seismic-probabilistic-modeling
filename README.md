@@ -1,6 +1,6 @@
 # EarthquakeNet
 
-Probabilistic forecasting of **weekly earthquake counts** on a spatial grid over Central Asia (USGS catalog, 2010–2024). The pipeline downloads and cleans seismic data, builds a spatiotemporal panel, fits classical GLM baselines (Poisson / Negative Binomial), deep learning models (Hybrid DL NB, Neural Poisson), and an ETAS per-cell baseline, then runs walk-forward validation, calibration diagnostics, tail metrics, and spatial residual tests.
+Probabilistic forecasting of **weekly earthquake counts** on a spatial grid over Central Asia (USGS catalog, 2 January 2010 – 27 December 2023). The pipeline downloads and cleans seismic data (or, with `SPM_OFFLINE=1`, uses the committed catalog), builds a spatiotemporal panel, fits classical GLM baselines (Poisson / Negative Binomial), deep learning models (Hybrid DL NB, Neural Poisson), and an ETAS per-cell baseline, then runs walk-forward validation, calibration diagnostics, tail metrics, and spatial residual tests.
 
 ```mermaid
 flowchart LR
@@ -22,7 +22,7 @@ Run all commands from the **repository root** (the folder that contains `main.py
 | --------------------------- | --------------------------------- | ------------------------------------------------------------------ |
 | **1. Install dependencies** | `pip install -r requirements.txt` | Python 3.10+ recommended; use a virtual environment                |
 | **2. Setup**                | *(not required)*                  | `main.py` creates `outputs/` and required subfolders automatically |
-| **3. Run the pipeline**     | `python main.py`                  | Full end-to-end run; needs internet if raw data must be re-fetched |
+| **3. Run the pipeline**     | `SPM_OFFLINE=1 python main.py`    | Full end-to-end run from the committed catalog; without `SPM_OFFLINE=1` it downloads the catalog again |
 
 
 Example:
@@ -102,10 +102,48 @@ Private research notes and the LaTeX manuscript live in `sandbox/` (gitignored, 
 
 The repository includes a snapshot of the USGS catalog and the processed panel:
 
-- `data/raw/usgs_central_asia_raw.csv`
+- `data/raw/usgs_central_asia_raw.csv` — the catalog the analysis is built on, 2 January 2010 to 27 December 2023
+- `data/raw/usgs_2024_2026_raw.csv` — 2024 to 13 September 2026, downloaded only after the analysis was frozen and used by the blind test
 - `data/processed/spatiotemporal_grid.csv`
 
-If raw data is removed, `main.py` will attempt to download events from USGS for the bounding box and date range defined in `src/config.py` (requires network access).
+Without `SPM_OFFLINE=1`, `main.py` downloads the catalog from USGS for the bounding box and dates in `src/config.py` and overwrites `data/raw/usgs_central_asia_raw.csv` (network access and the `requests` package are needed only for that). The runs reported in the paper use the committed catalogs.
+
+## Reproducing the paper
+
+All runs are offline. `SPM_OUTPUT_DIR` decides where the tables go; point it elsewhere to keep a run next to the published one.
+
+```bash
+# threshold 3.0 (the one preprint v1 used)
+SPM_OFFLINE=1 python main.py
+
+# threshold 4.5, the catalogue's completeness magnitude; the weekly axis is pinned
+# to the 3.0 catalogue so that both runs are scored on the same weeks
+SPM_OFFLINE=1 SPM_M_C=4.5 SPM_PIN_AXIS=1 SPM_PANEL_FILE=spatiotemporal_grid_mc45.csv \
+SPM_OUTPUT_DIR=outputs-mc45 python main.py
+
+# one more training seed (the paper uses 42, 7, 123, 2024 and 999; 42 is the default)
+SPM_OFFLINE=1 SPM_SEED=7 SPM_OUTPUT_DIR=outputs-seed7 python main.py
+
+# the blind test on 2024 - September 2026
+python blind/run_blind.py
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `SPM_OFFLINE=1` | use the committed catalog, download nothing |
+| `SPM_M_C` | completeness threshold for modelling (default 3.0) |
+| `SPM_PIN_AXIS=1` | take the weekly axis from the M ≥ 3.0 catalog |
+| `SPM_PANEL_FILE` | panel file name in `data/processed/` (default `spatiotemporal_grid.csv`) |
+| `SPM_KEEP_PANEL=1` | read the panel on disk instead of writing the rebuilt one |
+| `SPM_OUTPUT_DIR` | where the tables and figures go (default `outputs/`) |
+| `SPM_SEED` | training seed of both protocols (default 42) |
+
+## Blind test
+
+`python blind/run_blind.py` refits every model on data through 2023, forecasts
+2024 – September 2026 without retraining, and writes the comparison into
+`blind/outputs/`. It runs offline from the two committed catalogs and never
+writes into `outputs/`, `outputs-mc45/` or `data/`. Details: `blind/README.md`.
 
 ## Outputs (after `python main.py`)
 
