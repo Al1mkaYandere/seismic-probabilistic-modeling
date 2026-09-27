@@ -141,7 +141,7 @@ def _plot_hist_y_logscale(df: pd.DataFrame) -> None:
     ax.set_yscale("log")
     ax.set_ylim(bottom=0.8, top=ax.get_ylim()[1] * 2) 
     
-    ax.set_title(r"Distribution of Cell-Week Earthquake Counts ($M \geq 3.0$)", pad=15)
+    ax.set_title(rf"Distribution of Cell-Week Earthquake Counts ($M \geq {config.M_C:.1f}$)", pad=15)
     ax.set_xlabel(r"Weekly count $Y$")
     ax.set_ylabel("Frequency (log scale)")
     
@@ -196,7 +196,9 @@ def _plot_mean_vs_variance(cell_stats: pd.DataFrame) -> None:
             va="top",
             bbox={"facecolor": "white", "edgecolor": "#aaaaaa", "alpha": 0.9},
         )
-        ax.legend(loc="upper left", frameon=True)
+        # Lower right: the D annotation sits in the upper left and the points run
+        # along the diagonal, so this corner is the one left empty.
+        ax.legend(loc="lower right", frameon=True)
     ax.xaxis.set_major_locator(LogLocator(base=10.0))
     ax.yaxis.set_major_locator(LogLocator(base=10.0))
     ax.xaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
