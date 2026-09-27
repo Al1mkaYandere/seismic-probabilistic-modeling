@@ -6,6 +6,8 @@ outputs/*
 !outputs/.gitkeep
 # A run at another completeness threshold writes here; same rule as outputs/
 outputs-mc*/
+# The blind test writes its tables here; the driver that makes them is committed
+blind/outputs/
 
 # Python / Jupyter
 __pycache__/
